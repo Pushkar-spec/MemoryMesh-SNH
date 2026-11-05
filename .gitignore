@@ -1,0 +1,65 @@
+# Environment files & secrets
+.env
+.env.*
+!.env.example
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python byte-code and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Python distribution / packaging artifacts
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Testing & linting caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Application runtime data & SQLite databases
+data/
+*.db
+*.db-journal
+*.db-wal
+*.sqlite3
+
+# Node / Frontend artifacts (for future frontend scaffolding)
+node_modules/
+frontend/dist/
+frontend/.eslintcache
+
+# Editor & OS temporary files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+

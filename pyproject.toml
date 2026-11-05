@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memorymesh"
+version = "0.1.0"
+description = "Conflict-Aware Long-Term AI Memory"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "MemoryMesh Team" },
+]
+license = { text = "MIT" }
+dependencies = [
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0",
+    "networkx>=3.0",
+    "rapidfuzz>=3.0",
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.20.0",
+    "sse-starlette>=1.6.0",
+    "httpx>=0.24.0",
+    "anthropic>=0.20.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.1.0",
+]
+baseline = [
+    "fastembed>=0.2.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["docs", "*.md"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "UP",   # pyupgrade
+]
+ignore = []
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
