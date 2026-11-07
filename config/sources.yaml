@@ -1,0 +1,22 @@
+sources:
+  - id: sysadmin_priya
+    name: "Priya (Sysadmin)"
+    type: admin
+    reliability: 0.90
+  - id: ci_monitor
+    name: "CI/Monitoring"
+    type: tool
+    reliability: 0.85
+  - id: wiki
+    name: "Infra Wiki"
+    type: wiki
+    reliability: 0.75
+  - id: dev_chat
+    name: "Dev Chat"
+    type: chat
+    reliability: 0.50
+  - id: intern_chat
+    name: "Intern (Chat)"
+    type: chat
+    reliability: 0.30
+

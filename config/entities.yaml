@@ -1,0 +1,13 @@
+entities:
+  - name: "Server A"
+    type: server
+    aliases:
+      - "srv-a"
+      - "server-a"
+      - "the main API box"
+  - name: "Library X"
+    type: library
+    aliases:
+      - "libx"
+      - "lib-x"
+

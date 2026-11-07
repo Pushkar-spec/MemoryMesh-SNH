@@ -1,0 +1,70 @@
+attributes:
+  - attribute: python_version
+    description: "Python runtime version on a server"
+    cardinality: single
+    value_type: version
+    aliases:
+      - "python"
+      - "runtime"
+      - "py version"
+  - attribute: os_release
+    description: "Operating system and release"
+    cardinality: single
+    value_type: text
+    aliases:
+      - "os"
+      - "operating system"
+      - "ubuntu"
+  - attribute: owner_team
+    description: "Team that owns the system"
+    cardinality: single
+    value_type: text
+    aliases:
+      - "owned by"
+      - "owner"
+  - attribute: deploy_day
+    description: "Weekday on which deploys happen"
+    cardinality: single
+    value_type: enum
+    allowed_values:
+      - monday
+      - tuesday
+      - wednesday
+      - thursday
+      - friday
+      - saturday
+      - sunday
+    aliases:
+      - "deploys on"
+      - "release day"
+  - attribute: service_status
+    description: "Operational status"
+    cardinality: single
+    value_type: enum
+    half_life_days: 14.0
+    allowed_values:
+      - up
+      - down
+      - degraded
+      - maintenance
+    aliases:
+      - "status"
+      - "is down"
+      - "is up"
+  - attribute: runs_service
+    description: "Services hosted on a server"
+    cardinality: multi
+    value_type: text
+    aliases:
+      - "hosts"
+      - "runs"
+      - "serves"
+  - attribute: compatibility_note
+    description: "Statement that something works with a given runtime"
+    cardinality: single
+    value_type: text
+    aliases:
+      - "works with"
+      - "compatible with"
+      - "needs"
+

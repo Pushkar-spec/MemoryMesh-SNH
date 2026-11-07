@@ -1,0 +1,26 @@
+thresholds:
+  min_extract_confidence: 0.40   # below -> SKIP (R-SKIP-LOWCONF)
+  replace_margin: 0.80           # new_score >= old_score * margin -> REPLACE
+  reject_ratio: 0.50             # new_score <  old_score * ratio  -> REJECT
+  revert_margin: 1.00            # stricter replace margin when the new value equals a superseded value
+  max_confidence: 0.99
+  review_penalty: 0.50           # multiplier on confidence while needs_review
+  stale_floor: 0.30              # effective confidence below this -> is_stale
+  dispute_autoresolve_ratio: 0.50  # stretch S3
+fuzzy:
+  entity_auto_match: 90          # rapidfuzz token_set_ratio
+  entity_tiebreak_min: 75
+  text_duplicate_candidate: 70   # min ratio before asking the LLM classifier
+ablation:                        # all true in production; eval flips them one at a time
+  use_temporal: true
+  use_trust: true
+  use_cardinality: true
+  use_context: true
+  use_propagation: true
+llm:
+  provider: anthropic            # anthropic | gemini | fake  (env LLM_PROVIDER overrides)
+  fast_model: claude-haiku-5-5   # extractor, classifier, parser  (verify against provider docs)
+  answer_model: claude-sonnet-5-5
+  concurrency: 3
+  cache: true
+
