@@ -34,6 +34,10 @@ class EngineError(MemoryMeshError):
     """Base exception for resolution engine errors."""
 
 
+class NormalizationError(EngineError, ValueError):
+    """Raised when a value cannot be normalized according to its ValueType schema."""
+
+
 class InvalidValidityWindowError(EngineError, ValueError):
     """Raised when validity window dates violate logical or database constraints."""
 

@@ -7,14 +7,17 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from memorymesh.config import AppConfig, load_app_config
 from memorymesh.db import DEFAULT_DB_PATH, init_db
+from memorymesh.engine.classifier import classify_claim_memory
+from memorymesh.engine.normalize import normalize_value
 from memorymesh.engine.rules import resolve
-from memorymesh.errors import UnknownSourceError
+from memorymesh.errors import NormalizationError, UnknownSourceError
 from memorymesh.models import (
     Action,
     AddEdge,
@@ -41,6 +44,13 @@ from memorymesh.retrieval.retrieve import (
     retrieve_current,
     retrieve_valid_memories,
 )
+
+
+def _make_classifier(schema: AttributeDef) -> Callable[[ResolvedClaim, Memory], Relation]:
+    def classify(new_claim: ResolvedClaim, existing_mem: Memory) -> Relation:
+        return classify_claim_memory(new_claim, existing_mem, schema)
+
+    return classify
 
 
 class MemoryService:
@@ -168,11 +178,35 @@ class MemoryService:
                 context_key = build_context_key(claim.context)
                 valid_from = claim.valid_from or message.event_time
 
+                try:
+                    value_norm = normalize_value(
+                        claim.value,
+                        attr_def.value_type,
+                        allowed_values=attr_def.allowed_values,
+                    )
+                except NormalizationError as exc:
+                    # Documented SKIP behavior: skip invalid claim, do not create memory, log SKIP
+                    log_entry = DecisionLogEntry(
+                        id=0,
+                        message_id=message_id,
+                        claim_json=claim.model_dump(),
+                        action=Action.SKIP,
+                        rule_id="R-SKIP-VALUE",
+                        memory_id=None,
+                        affected_memory_ids=[],
+                        scores={},
+                        explanation=f"Skipped invalid value: {exc}",
+                        created_at=eff_recorded_at,
+                    )
+                    saved_log = self.repo.insert_decision_log(log_entry)
+                    decisions_log.append(saved_log)
+                    continue
+
                 rc = ResolvedClaim(
                     claim=claim,
                     entity_id=entity_id,
                     attribute=claim.attribute,
-                    value_norm=claim.value.strip(),
+                    value_norm=value_norm,
                     value_display=claim.value,
                     context_key=context_key,
                     valid_from=valid_from,
@@ -188,10 +222,7 @@ class MemoryService:
                     include_rejected=False,
                 )
 
-                def classify(new_claim: ResolvedClaim, existing_mem: Memory) -> Relation:
-                    if new_claim.value_norm == existing_mem.value_norm:
-                        return Relation.IDENTICAL
-                    return Relation.CONFLICTS
+                classify = _make_classifier(attr_def)
 
                 # Resolve dependency targets from claim.depends_on
                 dep_targets: list[int] = []

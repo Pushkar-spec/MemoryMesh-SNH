@@ -25,6 +25,7 @@ from memorymesh.models import (
     EdgeType,
     IngestMessage,
     MemoryStatus,
+    NewMemory,
     Source,
     ValueType,
 )
@@ -514,3 +515,187 @@ def test_identical_claim_on_different_message_raises_unsupported_relation(
     assert m1 is not None
     assert m1.status == MemoryStatus.ACTIVE
     assert m1.value_norm == "3.10"
+
+
+def test_ingest_claims_normalizes_value(service: MemoryService) -> None:
+    """Ingestion normalizes raw claim values and preserves raw text in value_display."""
+    t_msg = datetime(2026, 3, 1, 10, 0, tzinfo=UTC)
+    message = IngestMessage(
+        source_id="sysadmin_priya",
+        text="Server A runs Python v3.12",
+        event_time=t_msg,
+    )
+    claim = Claim(
+        subject="Server A",
+        attribute="python_version",
+        value="Python v3.12",
+        extract_confidence=0.95,
+        span="Python v3.12",
+    )
+
+    report = service.ingest_claims(message, [claim], recorded_at=t_msg)
+    assert len(report.decisions) == 1
+    mem_id = report.decisions[0].memory_id
+    assert mem_id is not None
+
+    mem = service.repo.get_memory(mem_id)
+    assert mem is not None
+    assert mem.value_norm == "3.12"
+    assert mem.value_display == "Python v3.12"
+
+
+def test_ingest_claims_invalid_value_skips_without_creating_memory(
+    service: MemoryService,
+) -> None:
+    """Invalid claim values follow documented SKIP behavior: logged as SKIP, no memory created."""
+    t_msg = datetime(2026, 3, 1, 10, 0, tzinfo=UTC)
+    message = IngestMessage(
+        source_id="sysadmin_priya",
+        text="Server A runs invalid version",
+        event_time=t_msg,
+    )
+    claim = Claim(
+        subject="Server A",
+        attribute="python_version",
+        value="no-version-here",
+        extract_confidence=0.95,
+    )
+
+    report = service.ingest_claims(message, [claim], recorded_at=t_msg)
+    assert report.duplicate is False
+    assert len(report.decisions) == 1
+    decision_entry = report.decisions[0]
+    assert decision_entry.action == Action.SKIP
+    assert decision_entry.rule_id == "R-SKIP-VALUE"
+    assert decision_entry.memory_id is None
+    assert "No valid version components found" in decision_entry.explanation
+
+    # Verify no memory was created in repository
+    current_res = service.current("Server A", "python_version", now=t_msg)
+    assert current_res.items == []
+
+
+def test_ingest_claims_passes_enum_allowed_values(service: MemoryService) -> None:
+    """ENUM allowed_values are passed from schema, normalizing valid or skipping invalid."""
+    service.repo.insert_attribute_schema(
+        AttributeDef(
+            attribute="env_tier",
+            description="Deployment tier",
+            cardinality=Cardinality.SINGLE,
+            value_type=ValueType.ENUM,
+            allowed_values=["production", "staging", "dev"],
+        )
+    )
+    t_msg = datetime(2026, 3, 1, 10, 0, tzinfo=UTC)
+
+    # 1. Valid mixed-case enum claim normalizes to lowercase
+    msg_valid = IngestMessage(
+        source_id="sysadmin_priya",
+        text="Server A deployed to STAGING",
+        event_time=t_msg,
+    )
+    claim_valid = Claim(
+        subject="Server A",
+        attribute="env_tier",
+        value="STAGING",
+        extract_confidence=0.95,
+    )
+    rep_valid = service.ingest_claims(msg_valid, [claim_valid], recorded_at=t_msg)
+    assert len(rep_valid.decisions) == 1
+    assert rep_valid.decisions[0].action == Action.INSERT
+    mem = service.repo.get_memory(rep_valid.decisions[0].memory_id)  # type: ignore[arg-type]
+    assert mem is not None
+    assert mem.value_norm == "staging"
+    assert mem.value_display == "STAGING"
+
+    # 2. Invalid enum value triggers SKIP without corrupting existing memory
+    t_msg2 = datetime(2026, 3, 2, 10, 0, tzinfo=UTC)
+    msg_invalid = IngestMessage(
+        source_id="sysadmin_priya",
+        text="Server A deployed to local",
+        event_time=t_msg2,
+    )
+    claim_invalid = Claim(
+        subject="Server A",
+        attribute="env_tier",
+        value="local",
+        extract_confidence=0.95,
+    )
+    rep_invalid = service.ingest_claims(msg_invalid, [claim_invalid], recorded_at=t_msg2)
+    assert len(rep_invalid.decisions) == 1
+    assert rep_invalid.decisions[0].action == Action.SKIP
+    assert rep_invalid.decisions[0].rule_id == "R-SKIP-VALUE"
+    assert "not an allowed enum value" in rep_invalid.decisions[0].explanation
+
+
+def test_ingest_claims_classifies_legacy_unnormalized_memory(service: MemoryService) -> None:
+    """Ingestion correctly classifies against legacy unnormalized existing memories."""
+    t_p12 = datetime(2026, 1, 15, 10, 0, tzinfo=UTC)
+    # Store initial message
+    msg1_id = service.repo.insert_message(
+        source_id="sysadmin_priya",
+        text="Legacy seed",
+        event_time=t_p12,
+    )
+    # Simulate an unnormalized legacy memory stored during P1.2
+    mem_id = service.repo.insert_memory(
+        memory=NewMemory(
+            entity_id=1,
+            attribute="python_version",
+            value_norm="v3.12",  # Unnormalized legacy storage
+            value_display="Python v3.12",
+            context_key="",
+            valid_from=t_p12,
+            status=MemoryStatus.ACTIVE,
+            confidence=0.95,
+            message_id=msg1_id,
+            source_id="sysadmin_priya",
+        ),
+        recorded_at=t_p12,
+    )
+    assert mem_id is not None
+
+    # 1. Incoming claim with normalized "3.12" against legacy "v3.12"
+    # Classifies as IDENTICAL, raising UnsupportedRelationError in P2.1 (not replacing!)
+    t2 = datetime(2026, 2, 1, 10, 0, tzinfo=UTC)
+    msg2 = IngestMessage(
+        source_id="sysadmin_priya",
+        text="Confirming Python 3.12",
+        event_time=t2,
+    )
+    claim_identical = Claim(
+        subject="Server A",
+        attribute="python_version",
+        value="3.12",
+        extract_confidence=0.95,
+    )
+    with pytest.raises(
+        (UnsupportedRelationError, ConflictResolutionError),
+        match="IDENTICAL.*deferred to Phase 3.*R-CORROBORATE",
+    ):
+        service.ingest_claims(msg2, [claim_identical], recorded_at=t2)
+
+    # 2. Incoming claim with conflicting "3.14" against legacy "v3.12"
+    # Classifies as CONFLICTS, replacing the legacy memory via R-REPLACE
+    t3 = datetime(2026, 3, 1, 10, 0, tzinfo=UTC)
+    msg3 = IngestMessage(
+        source_id="sysadmin_priya",
+        text="Upgraded to Python 3.14",
+        event_time=t3,
+    )
+    claim_replace = Claim(
+        subject="Server A",
+        attribute="python_version",
+        value="3.14",
+        extract_confidence=0.95,
+    )
+    rep3 = service.ingest_claims(msg3, [claim_replace], recorded_at=t3)
+    assert len(rep3.decisions) == 1
+    assert rep3.decisions[0].action == Action.REPLACE
+    assert rep3.decisions[0].rule_id == "R-REPLACE"
+
+    # Current memory is now 3.14
+    current_res = service.current("Server A", "python_version", now=t3)
+    assert len(current_res.items) == 1
+    assert current_res.items[0].memory.value_norm == "3.14"
+    assert current_res.items[0].memory.status == MemoryStatus.ACTIVE
