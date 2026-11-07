@@ -1,21 +1,22 @@
+SHELL = cmd.exe
 .PHONY: help setup test lint check api web types web-check eval smoke reset seed
 
 help:
 	@echo MemoryMesh Development Commands
 	@echo ===============================
-	@echo Active in P0.1:
+	@echo Active commands:
 	@echo   make setup     - Install package in editable mode with development dependencies
 	@echo   make test      - Run test suite with pytest
 	@echo   make lint      - Run ruff check and format verification
-	@echo   make check     - Run all applicable stage checks (lint + test)
+	@echo   make check     - Run backend stage checks (lint + test)
+	@echo   make smoke     - [P0.4] Run LLM provider smoke test
+	@echo   make web       - [P0.4] Start Vite React dev server
+	@echo   make web-check - [P0.4] Run frontend verification (eslint, tsc, vite build)
+	@echo   make types     - [P0.4/P9] Regenerate TypeScript API types from OpenAPI
 	@echo.
 	@echo Pending future phases:
 	@echo   make api       - [P9] Start FastAPI backend server
-	@echo   make web       - [P0.4/P9] Start Vite React dev server
-	@echo   make types     - [P9] Regenerate TypeScript API types from OpenAPI
-	@echo   make web-check - [P0.4] Run frontend verification (eslint, tsc, vite build)
 	@echo   make eval      - [P8] Run evaluation pipeline against baseline
-	@echo   make smoke     - [P0.4] Run LLM provider smoke test
 	@echo   make reset     - [P0.3] Reset database and recreate schema
 	@echo   make seed      - [P5] Seed demo scenario
 
@@ -42,23 +43,22 @@ api:
 	@exit 1
 
 web:
-	@echo ERROR: 'make web' is pending P0.4 / P9 (React frontend implementation).
-	@exit 1
+	npm --prefix frontend run dev
 
 types:
-	@echo ERROR: 'make types' is pending P9 (FastAPI and OpenAPI type generation).
-	@exit 1
+	@echo NOTE: 'make types' requires the FastAPI backend to be running at http://localhost:8000.
+	npx --prefix frontend openapi-typescript http://localhost:8000/openapi.json -o frontend/src/api/types.ts
 
 web-check:
-	@echo ERROR: 'make web-check' is pending P0.4 (Frontend scaffolding).
-	@exit 1
+	npm --prefix frontend run lint
+	npx --prefix frontend tsc -p frontend/tsconfig.app.json --noEmit
+	npm --prefix frontend run build
+
+smoke:
+	python scripts/smoke_test_llm.py
 
 eval:
 	@echo ERROR: 'make eval' is pending P8 (Evaluation suite).
-	@exit 1
-
-smoke:
-	@echo ERROR: 'make smoke' is pending P0.4 (LLM provider smoke test).
 	@exit 1
 
 reset:
