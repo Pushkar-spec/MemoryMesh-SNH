@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from memorymesh.errors import (
+    AliasCollisionError,
     ForeignKeyConstraintError,
     InvalidUpdateFieldError,
     MemoryNotFoundError,
@@ -641,6 +642,55 @@ class Repository:
             sql_ci = "SELECT * FROM entities WHERE LOWER(canonical_name) = LOWER(?)"
             row = self.conn.execute(sql_ci, (name,)).fetchone()
         return dict(row) if row else None
+
+    def insert_entity_alias(self, alias_norm: str, entity_id: int) -> bool:
+        """Insert a normalized entity alias mapping preserving existing ownership.
+
+        If the alias already points to `entity_id`, this is an idempotent no-op.
+        If the alias is already owned by a different entity, an AliasCollisionError
+        is raised to prevent silent transfer.
+        """
+        row = self.conn.execute(
+            "SELECT entity_id FROM entity_aliases WHERE alias_norm = ?",
+            (alias_norm,),
+        ).fetchone()
+
+        if row is not None:
+            existing_id = int(row["entity_id"])
+            if existing_id != entity_id:
+                raise AliasCollisionError(
+                    f"Alias '{alias_norm}' is already assigned to entity {existing_id}; "
+                    f"cannot reassign to entity {entity_id}."
+                )
+            return False
+
+        self.conn.execute(
+            "INSERT INTO entity_aliases (alias_norm, entity_id) VALUES (?, ?)",
+            (alias_norm, entity_id),
+        )
+        return True
+
+    def get_entity_by_alias(self, alias_norm: str) -> dict[str, Any] | None:
+        """Find an entity record via its normalized alias in entity_aliases table."""
+        sql = """
+        SELECT e.* FROM entities e
+        JOIN entity_aliases a ON e.id = a.entity_id
+        WHERE a.alias_norm = ?
+        """
+        row = self.conn.execute(sql, (alias_norm,)).fetchone()
+        return dict(row) if row else None
+
+    def list_entities(self) -> list[dict[str, Any]]:
+        """Retrieve all entity records ordered by ID."""
+        sql = "SELECT * FROM entities ORDER BY id ASC"
+        rows = self.conn.execute(sql).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_entity_aliases(self) -> list[dict[str, Any]]:
+        """Retrieve all entity alias records."""
+        sql = "SELECT * FROM entity_aliases"
+        rows = self.conn.execute(sql).fetchall()
+        return [dict(r) for r in rows]
 
     def get_attribute_schema(self, attribute: str) -> AttributeDef | None:
         """Retrieve an attribute catalog definition from the database."""

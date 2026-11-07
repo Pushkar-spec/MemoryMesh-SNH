@@ -15,6 +15,12 @@ from typing import Any
 from memorymesh.config import AppConfig, load_app_config
 from memorymesh.db import DEFAULT_DB_PATH, init_db
 from memorymesh.engine.classifier import classify_claim_memory
+from memorymesh.engine.entity import (
+    EntityCandidate,
+    EntityResolutionAction,
+    normalize_entity_name,
+    resolve_entity,
+)
 from memorymesh.engine.normalize import normalize_value
 from memorymesh.engine.rules import resolve
 from memorymesh.errors import NormalizationError, UnknownSourceError
@@ -73,6 +79,99 @@ class MemoryService:
 
         self.cfg = cfg or load_app_config()
         self.llm = llm
+
+    def _build_entity_candidates(self) -> list[EntityCandidate]:
+        """Build candidate entities from both configuration and database."""
+        candidates_map: dict[str, EntityCandidate] = {}
+
+        # 1. Configured entities
+        for cfg_ent in self.cfg.entities:
+            candidates_map[cfg_ent.name] = EntityCandidate(
+                canonical_name=cfg_ent.name,
+                entity_type=cfg_ent.type,
+                aliases=list(cfg_ent.aliases),
+                db_id=None,
+            )
+
+        # 2. Database entities and aliases
+        db_entities = self.repo.list_entities()
+        db_aliases = self.repo.list_entity_aliases()
+
+        aliases_by_id: dict[int, list[str]] = {}
+        for row in db_aliases:
+            ent_id = int(row["entity_id"])
+            aliases_by_id.setdefault(ent_id, []).append(row["alias_norm"])
+
+        for row in db_entities:
+            c_name = row["canonical_name"]
+            e_id = int(row["id"])
+            extra_aliases = aliases_by_id.get(e_id, [])
+
+            if c_name in candidates_map:
+                existing = candidates_map[c_name]
+                merged = list(dict.fromkeys(existing.aliases + extra_aliases))
+                candidates_map[c_name] = existing._replace(db_id=e_id, aliases=merged)
+            else:
+                candidates_map[c_name] = EntityCandidate(
+                    canonical_name=c_name,
+                    entity_type=row.get("type", "thing"),
+                    aliases=extra_aliases,
+                    db_id=e_id,
+                )
+
+        return list(candidates_map.values())
+
+    def _resolve_and_persist_entity(self, subject: str, recorded_at: datetime) -> int:
+        """Resolve subject using pure entity engine and persist resolution outcomes."""
+        candidates = self._build_entity_candidates()
+        auto_thresh = float(self.cfg.engine.fuzzy.entity_auto_match)
+        tie_thresh = float(self.cfg.engine.fuzzy.entity_tiebreak_min)
+
+        res = resolve_entity(
+            subject=subject,
+            candidates=candidates,
+            auto_match_threshold=auto_thresh,
+            tiebreak_min_threshold=tie_thresh,
+        )
+
+        norm_subject = normalize_entity_name(subject)
+
+        # High-confidence exact or fuzzy match with known database ID
+        if res.matched_entity_id is not None:
+            self.repo.insert_entity_alias(norm_subject, res.matched_entity_id)
+            return res.matched_entity_id
+
+        # Matched configured entity that was not yet created in DB
+        if res.action in (EntityResolutionAction.EXACT_MATCH, EntityResolutionAction.FUZZY_MATCH):
+            stored = self.repo.get_entity_by_name(res.canonical_name)
+            if stored is not None:
+                entity_id = int(stored["id"])
+            else:
+                entity_id = self.repo.insert_entity(
+                    canonical_name=res.canonical_name,
+                    entity_type=res.entity_type,
+                    needs_review=res.needs_review,
+                    created_at=recorded_at,
+                )
+            self.repo.insert_entity_alias(norm_subject, entity_id)
+            # Register all configured aliases for this entity
+            for cfg_ent in self.cfg.entities:
+                if cfg_ent.name == res.canonical_name:
+                    for alias in [cfg_ent.name, *cfg_ent.aliases]:
+                        self.repo.insert_entity_alias(normalize_entity_name(alias), entity_id)
+            return entity_id
+
+        # Ambiguous, review-level, or unknown: create separate entity with review flag
+        entity_id = self.repo.insert_entity(
+            canonical_name=res.canonical_name,
+            entity_type=res.entity_type,
+            needs_review=res.needs_review,
+            created_at=recorded_at,
+        )
+        # Do not register a colliding alias against the new entity or transfer it
+        if res.action != EntityResolutionAction.AMBIGUOUS_MATCH:
+            self.repo.insert_entity_alias(norm_subject, entity_id)
+        return entity_id
 
     # =========================================================================
     # Write: Structured Ingestion
@@ -136,15 +235,11 @@ class MemoryService:
             decisions_log: list[DecisionLogEntry] = []
 
             for claim in claims:
-                # Resolve or insert entity
-                ent = self.repo.get_entity_by_name(claim.subject)
-                if ent is None:
-                    entity_id = self.repo.insert_entity(
-                        canonical_name=claim.subject,
-                        created_at=eff_recorded_at,
-                    )
-                else:
-                    entity_id = int(ent["id"])
+                # Resolve or insert entity using two-tier deterministic resolution
+                entity_id = self._resolve_and_persist_entity(
+                    claim.subject,
+                    eff_recorded_at,
+                )
 
                 # Resolve or obtain attribute definition from catalog
                 attr_def = self.repo.get_attribute_schema(claim.attribute)
@@ -228,6 +323,10 @@ class MemoryService:
                 dep_targets: list[int] = []
                 for dep in claim.depends_on:
                     target_ent = self.repo.get_entity_by_name(dep.entity)
+                    if target_ent is None:
+                        target_ent = self.repo.get_entity_by_alias(
+                            normalize_entity_name(dep.entity)
+                        )
                     if target_ent:
                         target_mem = retrieve_current(
                             self.repo,
@@ -271,7 +370,8 @@ class MemoryService:
 
                 primary_mem_id = (
                     new_mem_id
-                    if decision.action in (Action.INSERT, Action.REPLACE)
+                    if decision.action
+                    in (Action.INSERT, Action.REPLACE, Action.COEXIST, Action.REFINE)
                     else (decision.affected_memory_ids[0] if decision.affected_memory_ids else None)
                 )
 
@@ -325,6 +425,8 @@ class MemoryService:
         )
 
         ent = self.repo.get_entity_by_name(entity)
+        if ent is None:
+            ent = self.repo.get_entity_by_alias(normalize_entity_name(entity))
         if ent is None:
             return QueryResult(plan=plan, items=[], notes=[f"Entity '{entity}' not found."])
 

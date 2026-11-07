@@ -497,13 +497,15 @@ def test_multi_cardinality_conflicting_claim_blocks_replace(
         message_id=102,
     )
 
-    with pytest.raises(ConflictResolutionError, match="Multi-valued attribute cardinality"):
-        resolve(
-            rc=rc_new,
-            chain=[existing_mem],
-            schema=multi_attr,
-            cfg=cfg,
-            classify=lambda _rc, _m: Relation.CONFLICTS,
-            dep_targets=[],
-            recorded_at=t_new,
-        )
+    decision = resolve(
+        rc=rc_new,
+        chain=[existing_mem],
+        schema=multi_attr,
+        cfg=cfg,
+        classify=lambda _rc, _m: Relation.CONFLICTS,
+        dep_targets=[],
+        recorded_at=t_new,
+    )
+    assert decision.action == Action.COEXIST
+    assert decision.rule_id == "R-COEXIST"
+    assert decision.action != Action.REPLACE

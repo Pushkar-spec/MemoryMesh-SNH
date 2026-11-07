@@ -26,6 +26,10 @@ class ForeignKeyConstraintError(RepositoryError):
     """Raised when an operation violates database foreign key constraints."""
 
 
+class AliasCollisionError(RepositoryError):
+    """Raised when an attempt is made to reassign an existing alias to a different entity."""
+
+
 class UnknownSourceError(MemoryMeshError):
     """Raised when an operation references a source not registered in the system."""
 

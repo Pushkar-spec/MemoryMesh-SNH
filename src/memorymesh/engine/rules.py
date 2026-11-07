@@ -1,6 +1,6 @@
-"""Deterministic resolution engine rules (R-INSERT, R-REPLACE).
+"""Deterministic resolution engine rules (R-INSERT, R-REPLACE, R-COEXIST, R-REFINE).
 
-Governed by docs/RESOLUTION_ENGINE.md, docs/SPECIFICATION.md Section 1.1, and docs/AGENTS.md.
+Governed by docs/SPECIFICATION.md Section 1.1, docs/ARCHITECTURE.md, and docs/AGENTS.md.
 All functions in this module are pure functions: inputs in, Decision out.
 No database access, no network calls, and no datetime.now() invocations.
 """
@@ -101,16 +101,49 @@ def resolve(
             "Backfilling into an earlier gap is deferred to Phase 6 (R-BACKFILL)."
         )
 
-    # 4. Enforce attribute cardinality
-    if schema.cardinality != Cardinality.SINGLE:
-        raise ConflictResolutionError(
-            f"Multi-valued attribute cardinality ('{schema.cardinality.value}') cannot "
-            "trigger R-REPLACE; multi-valued resolution is deferred to Phase 2 (R-COEXIST)."
+    # 4. Multi-valued attribute resolution (R-COEXIST)
+    if schema.cardinality == Cardinality.MULTI:
+        for m in live:
+            rel = classify(rc, m)
+            if rel == Relation.IDENTICAL:
+                raise UnsupportedRelationError(
+                    f"Claim matches existing memory value '{m.value_norm}' (Relation.IDENTICAL). "
+                    "Corroborating existing memories is deferred to Phase 3 (R-CORROBORATE)."
+                )
+
+        # Distinct values on multi-valued attributes coexist independently
+        return _produce_r_coexist(
+            rc=rc,
+            live=live,
+            dep_targets=dep_targets,
+            recorded_at=recorded_at,
         )
 
-    # 5. Single-valued conflict check
+    # 5. Single-valued resolution (R-REPLACE, R-REFINE)
     for m in live:
         rel = classify(rc, m)
+        if rel == Relation.IDENTICAL:
+            raise UnsupportedRelationError(
+                f"Claim matches existing memory value '{m.value_norm}' (Relation.IDENTICAL). "
+                "Corroborating existing memories is deferred to Phase 3 (R-CORROBORATE)."
+            )
+
+        if rel == Relation.REFINES:
+            # Verify claim is strictly newer than all live memories being refined
+            newer = all(rc.valid_from > mem.valid_from for mem in live)
+            if not newer:
+                raise ConflictResolutionError(
+                    "Cannot refine: claim is not newer than existing memory (equal or earlier "
+                    "valid_from)."
+                )
+
+            return _produce_r_refine(
+                rc=rc,
+                live=live,
+                dep_targets=dep_targets,
+                recorded_at=recorded_at,
+            )
+
         if rel == Relation.CONFLICTS:
             # Verify claim is strictly newer than all live memories being replaced
             newer = all(rc.valid_from > mem.valid_from for mem in live)
@@ -127,15 +160,9 @@ def resolve(
                 recorded_at=recorded_at,
             )
 
-        if rel == Relation.IDENTICAL:
-            raise UnsupportedRelationError(
-                f"Claim matches existing memory value '{m.value_norm}' (Relation.IDENTICAL). "
-                "Corroborating existing memories is deferred to Phase 3 (R-CORROBORATE)."
-            )
-
         rel_str = rel.value if hasattr(rel, "value") else str(rel)
         raise UnsupportedRelationError(
-            f"Relation '{rel_str}' is not supported in Phase 1 (deferred to later phases)."
+            f"Relation '{rel_str}' is not supported (deferred to later phases)."
         )
 
     raise ConflictResolutionError("No applicable rule matched candidate memories.")
@@ -269,6 +296,149 @@ def _produce_r_replace(
     return Decision(
         action=Action.REPLACE,
         rule_id="R-REPLACE",
+        explanation=explanation,
+        scores={"new_score": 1.0, "old_score": 1.0},
+        mutations=mutations,
+        affected_memory_ids=affected_ids,
+    )
+
+
+def _produce_r_coexist(
+    rc: ResolvedClaim,
+    live: list[Memory],
+    dep_targets: list[int],
+    recorded_at: datetime,
+) -> Decision:
+    """Build an R-COEXIST Decision inserting a new memory on a multi-valued attribute."""
+    new_mem = NewMemory(
+        entity_id=rc.entity_id,
+        attribute=rc.attribute,
+        value_norm=rc.value_norm,
+        value_display=rc.value_display,
+        context=rc.claim.context,
+        context_key=rc.context_key,
+        valid_from=rc.valid_from,
+        valid_to=rc.valid_to,
+        closed_at=recorded_at if rc.valid_to is not None else None,
+        status=MemoryStatus.ACTIVE,
+        confidence=1.0,
+        raw_text=rc.claim.span or "",
+        message_id=rc.message_id,
+        source_id=rc.source.id,
+    )
+    new_evidence = NewEvidence(
+        source_id=rc.source.id,
+        message_id=rc.message_id,
+        strength=1.0,
+        observed_at=recorded_at,
+        span=rc.claim.span,
+    )
+
+    mutations: list[Mutation] = [InsertMemory(memory=new_mem, evidence=new_evidence)]
+
+    for target_id in dep_targets:
+        mutations.append(
+            AddEdge(
+                src="$new",
+                dst=target_id,
+                type=EdgeType.DEPENDS_ON,
+                reason="claim dependency",
+            )
+        )
+
+    coexisting_ids = [m.id for m in live]
+    explanation = (
+        f"Claim value '{rc.value_norm}' coexists with existing live memories "
+        f"on multi-valued attribute '{rc.attribute}'."
+    )
+
+    return Decision(
+        action=Action.COEXIST,
+        rule_id="R-COEXIST",
+        explanation=explanation,
+        scores={"new_score": 1.0},
+        mutations=mutations,
+        affected_memory_ids=coexisting_ids,
+    )
+
+
+def _produce_r_refine(
+    rc: ResolvedClaim,
+    live: list[Memory],
+    dep_targets: list[int],
+    recorded_at: datetime,
+) -> Decision:
+    """Build an R-REFINE Decision superseding coarser live memories with a more specific value."""
+    new_mem = NewMemory(
+        entity_id=rc.entity_id,
+        attribute=rc.attribute,
+        value_norm=rc.value_norm,
+        value_display=rc.value_display,
+        context=rc.claim.context,
+        context_key=rc.context_key,
+        valid_from=rc.valid_from,
+        valid_to=rc.valid_to,
+        closed_at=recorded_at if rc.valid_to is not None else None,
+        status=MemoryStatus.ACTIVE,
+        confidence=1.0,
+        raw_text=rc.claim.span or "",
+        message_id=rc.message_id,
+        source_id=rc.source.id,
+    )
+    new_evidence = NewEvidence(
+        source_id=rc.source.id,
+        message_id=rc.message_id,
+        strength=1.0,
+        observed_at=recorded_at,
+        span=rc.claim.span,
+    )
+
+    mutations: list[Mutation] = [InsertMemory(memory=new_mem, evidence=new_evidence)]
+    affected_ids: list[int] = []
+
+    for old_m in live:
+        affected_ids.append(old_m.id)
+        mutations.append(
+            UpdateMemory(
+                memory_id=old_m.id,
+                fields={
+                    "status": MemoryStatus.HISTORICAL,
+                    "valid_to": rc.valid_from,
+                    "closed_at": recorded_at,
+                },
+            )
+        )
+        mutations.append(
+            AddEdge(
+                src="$new",
+                dst=old_m.id,
+                type=EdgeType.REFINES,
+                reason=(
+                    f"refines coarser memory M{old_m.id} ('{old_m.value_norm}') "
+                    f"with '{rc.value_norm}'"
+                ),
+            )
+        )
+
+    for target_id in dep_targets:
+        mutations.append(
+            AddEdge(
+                src="$new",
+                dst=target_id,
+                type=EdgeType.DEPENDS_ON,
+                reason="claim dependency",
+            )
+        )
+
+    live_ids_str = ", ".join(f"M{m_id}" for m_id in affected_ids)
+    explanation = (
+        f"Newer more-specific claim refines existing memory {live_ids_str} "
+        f"on attribute '{rc.attribute}'."
+    )
+
+    return Decision(
+        action=Action.REFINE,
+        rule_id="R-REFINE",
         explanation=explanation,
         scores={"new_score": 1.0, "old_score": 1.0},
         mutations=mutations,
