@@ -22,7 +22,10 @@ from memorymesh.errors import (
     RepositoryError,
 )
 from memorymesh.models import (
+    Action,
     AttributeDef,
+    Cardinality,
+    DecisionLogEntry,
     Edge,
     EdgeType,
     Evidence,
@@ -31,6 +34,7 @@ from memorymesh.models import (
     NewEvidence,
     NewMemory,
     Source,
+    ValueType,
     format_datetime_utc,
 )
 
@@ -330,6 +334,56 @@ class Repository:
         rows = cursor.fetchall()
         return [self._row_to_memory(r, include_evidence=True) for r in rows]
 
+    def find_memories(
+        self,
+        entity_id: int,
+        attribute: str,
+        *,
+        valid_at: datetime | None = None,
+        known_at: datetime | None = None,
+        context_key: str | None = None,
+        include_rejected: bool = False,
+    ) -> list[Memory]:
+        """Find memories matching temporal criteria, ordered valid_from DESC, id DESC."""
+        clauses = ["m.entity_id = ?", "m.attribute = ?"]
+        params: list[Any] = [entity_id, attribute]
+
+        if not include_rejected:
+            clauses.append("m.status != 'rejected'")
+
+        if context_key is not None:
+            clauses.append("m.context_key = ?")
+            params.append(context_key)
+
+        if known_at is not None:
+            known_str = format_datetime_utc(known_at)
+            clauses.append("m.recorded_at <= ?")
+            params.append(known_str)
+
+        if valid_at is not None:
+            valid_str = format_datetime_utc(valid_at)
+            clauses.append("m.valid_from <= ?")
+            params.append(valid_str)
+
+            if known_at is not None:
+                clauses.append("(m.valid_to IS NULL OR m.valid_to > ? OR m.closed_at > ?)")
+                params.append(valid_str)
+                params.append(known_str)
+            else:
+                clauses.append("(m.valid_to IS NULL OR m.valid_to > ?)")
+                params.append(valid_str)
+
+        sql = f"""
+        SELECT m.*, e.canonical_name AS entity_name
+        FROM memories m
+        LEFT JOIN entities e ON m.entity_id = e.id
+        WHERE {" AND ".join(clauses)}
+        ORDER BY m.valid_from DESC, m.id DESC
+        """
+        cursor = self.conn.execute(sql, params)
+        rows = cursor.fetchall()
+        return [self._row_to_memory(r, include_evidence=True) for r in rows]
+
     def _row_to_memory(self, row: sqlite3.Row, include_evidence: bool = True) -> Memory:
         """Convert a SQLite Row into a typed Memory model."""
         memory_id = int(row["id"])
@@ -558,3 +612,113 @@ class Repository:
             ),
         )
         return cursor.lastrowid or 0
+
+    def get_source(self, source_id: str) -> Source | None:
+        """Retrieve a source definition from the database by ID."""
+        sql = "SELECT * FROM sources WHERE id = ?"
+        row = self.conn.execute(sql, (source_id,)).fetchone()
+        if row is None:
+            return None
+        return Source(
+            id=str(row["id"]),
+            name=str(row["name"]),
+            type=row["type"],
+            reliability=float(row["reliability"]),
+            notes=str(row["notes"] or ""),
+        )
+
+    def get_entity(self, entity_id: int) -> dict[str, Any] | None:
+        """Find an entity record by integer ID."""
+        sql = "SELECT * FROM entities WHERE id = ?"
+        row = self.conn.execute(sql, (entity_id,)).fetchone()
+        return dict(row) if row else None
+
+    def get_entity_by_name(self, name: str) -> dict[str, Any] | None:
+        """Find an entity by canonical_name with case-insensitive fallback."""
+        sql = "SELECT * FROM entities WHERE canonical_name = ?"
+        row = self.conn.execute(sql, (name,)).fetchone()
+        if row is None:
+            sql_ci = "SELECT * FROM entities WHERE LOWER(canonical_name) = LOWER(?)"
+            row = self.conn.execute(sql_ci, (name,)).fetchone()
+        return dict(row) if row else None
+
+    def get_attribute_schema(self, attribute: str) -> AttributeDef | None:
+        """Retrieve an attribute catalog definition from the database."""
+        sql = "SELECT * FROM attribute_schema WHERE attribute = ?"
+        row = self.conn.execute(sql, (attribute,)).fetchone()
+        if row is None:
+            return None
+        return AttributeDef(
+            attribute=str(row["attribute"]),
+            description=str(row["description"]),
+            cardinality=Cardinality(row["cardinality"]),
+            value_type=ValueType(row["value_type"]),
+            half_life_days=(
+                float(row["half_life_days"]) if row["half_life_days"] is not None else None
+            ),
+            allowed_values=json.loads(row["allowed_values_json"]),
+        )
+
+    def get_message_by_hash(
+        self, source_id: str, text_hash: str, event_time: datetime
+    ) -> int | None:
+        """Find an existing message by (source_id, text_hash, event_time)."""
+        sql = """
+        SELECT id FROM messages
+        WHERE source_id = ? AND text_hash = ? AND event_time = ?
+        """
+        cursor = self.conn.execute(sql, (source_id, text_hash, format_datetime_utc(event_time)))
+        row = cursor.fetchone()
+        return int(row["id"]) if row else None
+
+    def insert_decision_log(self, entry: DecisionLogEntry) -> DecisionLogEntry:
+        """Insert a decision log row and return the persisted entry with its generated ID."""
+        sql = """
+        INSERT INTO decision_log (
+            message_id, claim_json, action, rule_id,
+            memory_id, affected_ids_json, scores_json, explanation, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        claim_json_str = json.dumps(entry.claim_json)
+        affected_ids_str = json.dumps(entry.affected_memory_ids)
+        scores_str = json.dumps(entry.scores)
+        created_at_str = format_datetime_utc(entry.created_at)
+        action_str = entry.action.value if hasattr(entry.action, "value") else str(entry.action)
+
+        cursor = self.conn.execute(
+            sql,
+            (
+                entry.message_id,
+                claim_json_str,
+                action_str,
+                entry.rule_id,
+                entry.memory_id,
+                affected_ids_str,
+                scores_str,
+                entry.explanation,
+                created_at_str,
+            ),
+        )
+        persisted_id = cursor.lastrowid or 0
+        return entry.model_copy(update={"id": persisted_id})
+
+    def get_decision_logs_for_message(self, message_id: int) -> list[DecisionLogEntry]:
+        """Retrieve decision log entries for a given message ID."""
+        sql = "SELECT * FROM decision_log WHERE message_id = ? ORDER BY id ASC"
+        cursor = self.conn.execute(sql, (message_id,))
+        rows = cursor.fetchall()
+        return [
+            DecisionLogEntry(
+                id=int(r["id"]),
+                message_id=int(r["message_id"]),
+                claim_json=json.loads(r["claim_json"]),
+                action=Action(r["action"]),
+                rule_id=str(r["rule_id"]),
+                memory_id=int(r["memory_id"]) if r["memory_id"] is not None else None,
+                affected_memory_ids=json.loads(r["affected_ids_json"]),
+                scores=json.loads(r["scores_json"]),
+                explanation=str(r["explanation"]),
+                created_at=parse_db_datetime(r["created_at"]),  # type: ignore[arg-type]
+            )
+            for r in rows
+        ]

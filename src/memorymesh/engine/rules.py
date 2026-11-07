@@ -11,7 +11,11 @@ from collections.abc import Callable
 from datetime import datetime
 
 from memorymesh.config import EngineConfig
-from memorymesh.errors import ConflictResolutionError, InvalidValidityWindowError
+from memorymesh.errors import (
+    ConflictResolutionError,
+    InvalidValidityWindowError,
+    UnsupportedRelationError,
+)
 from memorymesh.models import (
     Action,
     AddEdge,
@@ -123,8 +127,15 @@ def resolve(
                 recorded_at=recorded_at,
             )
 
-        raise NotImplementedError(
-            f"Relation '{rel}' is not implemented in P1.1 (deferred to later phases)."
+        if rel == Relation.IDENTICAL:
+            raise UnsupportedRelationError(
+                f"Claim matches existing memory value '{m.value_norm}' (Relation.IDENTICAL). "
+                "Corroborating existing memories is deferred to Phase 3 (R-CORROBORATE)."
+            )
+
+        rel_str = rel.value if hasattr(rel, "value") else str(rel)
+        raise UnsupportedRelationError(
+            f"Relation '{rel_str}' is not supported in Phase 1 (deferred to later phases)."
         )
 
     raise ConflictResolutionError("No applicable rule matched candidate memories.")

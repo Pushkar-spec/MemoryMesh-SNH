@@ -26,6 +26,10 @@ class ForeignKeyConstraintError(RepositoryError):
     """Raised when an operation violates database foreign key constraints."""
 
 
+class UnknownSourceError(MemoryMeshError):
+    """Raised when an operation references a source not registered in the system."""
+
+
 class EngineError(MemoryMeshError):
     """Base exception for resolution engine errors."""
 
@@ -36,3 +40,7 @@ class InvalidValidityWindowError(EngineError, ValueError):
 
 class ConflictResolutionError(EngineError, ValueError):
     """Raised when a conflict cannot be resolved under the active resolution rules."""
+
+
+class UnsupportedRelationError(ConflictResolutionError, NotImplementedError):
+    """Raised when a claim-memory relation (e.g., IDENTICAL) is not supported in Phase 1."""
