@@ -1,5 +1,5 @@
 SHELL = cmd.exe
-.PHONY: help setup test lint check api web types web-check eval smoke reset seed
+.PHONY: help setup test lint check api web types web-check eval smoke reset seed demo
 
 help:
 	@echo MemoryMesh Development Commands
@@ -9,6 +9,7 @@ help:
 	@echo   make test      - Run test suite with pytest
 	@echo   make lint      - Run ruff check and format verification
 	@echo   make check     - Run backend stage checks (lint + test)
+	@echo   make demo      - [P1.3] Run structured temporal memory CLI demonstration
 	@echo   make smoke     - [P0.4] Run LLM provider smoke test
 	@echo   make web       - [P0.4] Start Vite React dev server
 	@echo   make web-check - [P0.4] Run frontend verification (eslint, tsc, vite build)
@@ -56,6 +57,9 @@ web-check:
 
 smoke:
 	python scripts/smoke_test_llm.py
+
+demo:
+	python scripts/demo_temporal_memory.py
 
 eval:
 	@echo ERROR: 'make eval' is pending P8 (Evaluation suite).

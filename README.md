@@ -34,8 +34,29 @@ make reset && make seed                                # create DB and load the 
 make api                                               # FastAPI backend on http://localhost:8000 (docs at /docs)
 make web                                               # React UI on http://localhost:5173 (run in a second terminal)
 make eval                                              # run benchmark vs naive RAG
+make demo                                              # run temporal memory CLI demonstration
 make check                                             # lint + tests (run before every commit)
 ```
+
+## Structured temporal memory CLI demonstration
+
+MemoryMesh includes a deterministic CLI demonstration illustrating write-time conflict resolution (`R-INSERT`, `R-REPLACE`) and bitemporal retrieval (`current`, `as_of`).
+
+### Prerequisites
+- Python environment with MemoryMesh installed (`pip install -e ".[dev]"`).
+- No API keys or external services required (executes in an isolated in-memory SQLite database).
+
+### Command
+```bash
+make demo
+# or: python scripts/demo_temporal_memory.py
+```
+
+### Expected output summary
+1. **Initial Claim (`2026-03-01`)**: Server A runs Python 3.10 -> `R-INSERT` creates memory `#1` (`[2026-03-01, OPEN)`).
+2. **Conflicting Claim (`2026-06-01`)**: Server A migrated to Python 3.12 -> `R-REPLACE` creates memory `#2` (`[2026-06-01, OPEN)`) and closes `#1` (`valid_to = 2026-06-01`).
+3. **Current Query (`now = 2026-06-15`)**: Returns Python `3.12` (active memory).
+4. **Historical Query (`valid_at = 2026-03-15`)**: Returns Python `3.10` (historical memory valid as of that date).
 
 ## Documentation map
 
