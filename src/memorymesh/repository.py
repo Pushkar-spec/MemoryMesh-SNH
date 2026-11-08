@@ -564,6 +564,36 @@ class Repository:
             for r in rows
         ]
 
+    def get_superseded_ancestor_values(self, memory_ids: list[int] | set[int]) -> set[str]:
+        """Retrieve historical values superseded by memory_ids through the supersession chain.
+
+        Recursively traces edges where type='supersedes' (src_memory_id -> dst_memory_id),
+        returning distinct normalized values of historical memories reachable from input IDs.
+        """
+        if not memory_ids:
+            return set()
+
+        id_list = list(memory_ids)
+        placeholders = ",".join("?" for _ in id_list)
+        sql = f"""
+        WITH RECURSIVE supersession_chain(ancestor_id) AS (
+            SELECT dst_memory_id
+            FROM edges
+            WHERE src_memory_id IN ({placeholders}) AND type = 'supersedes'
+            UNION
+            SELECT e.dst_memory_id
+            FROM edges e
+            JOIN supersession_chain sc ON e.src_memory_id = sc.ancestor_id
+            WHERE e.type = 'supersedes'
+        )
+        SELECT DISTINCT m.value_norm
+        FROM memories m
+        JOIN supersession_chain sc ON m.id = sc.ancestor_id
+        WHERE m.status = 'historical';
+        """
+        cursor = self.conn.execute(sql, id_list)
+        return {str(row[0]) for row in cursor.fetchall()}
+
     # =========================================================================
     # Seeding and Infrastructure Operations
     # =========================================================================

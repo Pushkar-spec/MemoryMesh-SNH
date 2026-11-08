@@ -12,7 +12,12 @@ from datetime import datetime
 from typing import Any
 
 from memorymesh.config import EngineConfig
-from memorymesh.engine.confidence import calculate_base_confidence, calculate_strength
+from memorymesh.engine.confidence import (
+    calculate_base_confidence,
+    calculate_decay,
+    calculate_effective_confidence,
+    calculate_strength,
+)
 from memorymesh.errors import (
     ConflictResolutionError,
     InvalidValidityWindowError,
@@ -39,6 +44,28 @@ from memorymesh.models import (
 )
 
 
+def _compute_memory_score(
+    m: Memory,
+    valid_at: datetime,
+    schema: AttributeDef,
+    cfg: EngineConfig,
+) -> float:
+    """Calculate comparable memory score at a given reference time."""
+    if not cfg.ablation.use_trust:
+        return 1.0
+    decay = (
+        calculate_decay(m.valid_from, valid_at, schema.half_life_days)
+        if cfg.ablation.use_temporal
+        else 1.0
+    )
+    return calculate_effective_confidence(
+        m.confidence,
+        decay_factor=decay,
+        needs_review=m.needs_review,
+        review_penalty=cfg.thresholds.review_penalty,
+    )
+
+
 def covers(m: Memory, t: datetime) -> bool:
     """Determine whether a memory covers a point in time t.
 
@@ -60,6 +87,7 @@ def resolve(
     classify: Callable[[ResolvedClaim, Memory], Relation],
     dep_targets: list[int],
     recorded_at: datetime,
+    superseded_ancestor_values: set[str] | None = None,
 ) -> Decision:
     """Pure resolution function evaluating deterministic rules on candidate memories.
 
@@ -75,6 +103,7 @@ def resolve(
         classify: Callable returning the relation between claim and memory.
         dep_targets: List of memory IDs this claim depends on.
         recorded_at: Ingestion timestamp used for recorded_at and closed_at.
+        superseded_ancestor_values: Historical values superseded by live memories in this slot.
 
     Returns:
         A deterministic Decision object containing mutations and affected memory IDs.
@@ -84,6 +113,20 @@ def resolve(
         raise InvalidValidityWindowError(
             f"valid_to must be greater than valid_from: valid_to ({rc.valid_to}) <= "
             f"valid_from ({rc.valid_from})."
+        )
+
+    # Low-confidence extraction skip (R-SKIP-LOWCONF)
+    if rc.claim.extract_confidence < cfg.thresholds.min_extract_confidence:
+        return Decision(
+            action=Action.SKIP,
+            rule_id="R-SKIP-LOWCONF",
+            explanation=(
+                f"Skipped claim with extract_confidence {rc.claim.extract_confidence:.2f} "
+                f"< min_extract_confidence {cfg.thresholds.min_extract_confidence:.2f}."
+            ),
+            scores={"extract_confidence": rc.claim.extract_confidence},
+            mutations=[],
+            affected_memory_ids=[],
         )
 
     # Calculate claim strength
@@ -97,9 +140,44 @@ def resolve(
     # 2. Filter candidate memories covering rc.valid_from
     cover = [m for m in chain if covers(m, rc.valid_from)]
     live = [m for m in cover if m.status in (MemoryStatus.ACTIVE, MemoryStatus.DISPUTED)]
+    hist = [m for m in cover if m.status == MemoryStatus.HISTORICAL]
 
-    # 3. R-INSERT: Empty chain or no covering live memories with no later memories
+    # 3. No covering live memories
     if not live:
+        if hist:
+            # Conflict with history only (new claim reaches back into a closed historical window)
+            rel = classify(rc, hist[0])
+            if rel in (Relation.IDENTICAL, Relation.REFINES):
+                return _produce_r_corroborate_or_dup(
+                    rc=rc,
+                    target=hist[0],
+                    s_new=s_new,
+                    cfg=cfg,
+                    recorded_at=recorded_at,
+                )
+            if rel == Relation.CONFLICTS:
+                hist_score = _compute_memory_score(hist[0], rc.valid_from, schema, cfg)
+                if s_new < hist_score * cfg.thresholds.reject_ratio:
+                    return _produce_r_reject(
+                        rc=rc,
+                        live=[hist[0]],
+                        recorded_at=recorded_at,
+                        s_new=s_new,
+                        old_score=hist_score,
+                        reject_ratio=cfg.thresholds.reject_ratio,
+                    )
+                return _produce_r_dispute(
+                    rc=rc,
+                    live=[hist[0]],
+                    dep_targets=dep_targets,
+                    recorded_at=recorded_at,
+                    s_new=s_new,
+                    old_score=hist_score,
+                    margin=cfg.thresholds.replace_margin,
+                    reject_ratio=cfg.thresholds.reject_ratio,
+                    is_revert=False,
+                )
+
         later = next((m for m in chain if m.valid_from > rc.valid_from), None)
         if later is None:
             return _produce_r_insert(
@@ -165,21 +243,59 @@ def resolve(
             )
 
         if rel == Relation.CONFLICTS:
-            # Verify claim is strictly newer than all live memories being replaced
-            newer = all(rc.valid_from > mem.valid_from for mem in live)
-            if not newer:
-                raise ConflictResolutionError(
-                    "Cannot replace: claim is not newer than existing memory (equal or earlier "
-                    "valid_from). Non-newer conflicts require R-DISPUTE/R-REJECT (deferred to P3)."
-                )
-
-            return _produce_r_replace(
-                rc=rc,
-                live=live,
-                dep_targets=dep_targets,
-                recorded_at=recorded_at,
-                s_new=s_new,
+            old_score = max(
+                _compute_memory_score(m_live, rc.valid_from, schema, cfg) for m_live in live
             )
+
+            # Check revert guard against superseded historical ancestors
+            if superseded_ancestor_values is not None:
+                superseded_values = superseded_ancestor_values
+            else:
+                # Deterministic fallback for pure unit tests without repository access:
+                # only consider historical memories directly closed by live memories
+                superseded_values = {
+                    m_hist.value_norm
+                    for m_hist in chain
+                    if m_hist.status == MemoryStatus.HISTORICAL
+                    and any(m_hist.valid_to == m_live.valid_from for m_live in live)
+                }
+            is_revert = rc.value_norm in superseded_values
+            margin = cfg.thresholds.revert_margin if is_revert else cfg.thresholds.replace_margin
+
+            newer = all(rc.valid_from > mem.valid_from for mem in live)
+
+            if newer and s_new >= old_score * margin:
+                return _produce_r_replace(
+                    rc=rc,
+                    live=live,
+                    dep_targets=dep_targets,
+                    recorded_at=recorded_at,
+                    s_new=s_new,
+                    old_score=old_score,
+                    margin=margin,
+                    is_revert=is_revert,
+                )
+            elif s_new < old_score * cfg.thresholds.reject_ratio:
+                return _produce_r_reject(
+                    rc=rc,
+                    live=live,
+                    recorded_at=recorded_at,
+                    s_new=s_new,
+                    old_score=old_score,
+                    reject_ratio=cfg.thresholds.reject_ratio,
+                )
+            else:
+                return _produce_r_dispute(
+                    rc=rc,
+                    live=live,
+                    dep_targets=dep_targets,
+                    recorded_at=recorded_at,
+                    s_new=s_new,
+                    old_score=old_score,
+                    margin=margin,
+                    reject_ratio=cfg.thresholds.reject_ratio,
+                    is_revert=is_revert,
+                )
 
         rel_str = rel.value if hasattr(rel, "value") else str(rel)
         raise UnsupportedRelationError(
@@ -329,6 +445,9 @@ def _produce_r_replace(
     dep_targets: list[int],
     recorded_at: datetime,
     s_new: float = 1.0,
+    old_score: float = 1.0,
+    margin: float = 0.80,
+    is_revert: bool = False,
 ) -> Decision:
     """Build an R-REPLACE Decision closing existing memory windows at rc.valid_from."""
     new_mem = NewMemory(
@@ -390,16 +509,179 @@ def _produce_r_replace(
         )
 
     live_ids_str = ", ".join(f"M{m_id}" for m_id in affected_ids)
-    explanation = (
-        f"Newer conflicting claim replaces existing memory {live_ids_str} "
-        f"on single-valued attribute '{rc.attribute}'."
-    )
+    if is_revert:
+        explanation = (
+            f"Newer claim reverts attribute '{rc.attribute}' to previously superseded "
+            f"value '{rc.value_norm}' with sufficient trust (score {s_new:.3f} >= "
+            f"{old_score * margin:.3f}, revert_margin={margin})."
+        )
+    else:
+        explanation = (
+            f"Newer conflicting claim replaces existing memory {live_ids_str} "
+            f"on single-valued attribute '{rc.attribute}' (score {s_new:.3f} >= "
+            f"{old_score * margin:.3f}, replace_margin={margin})."
+        )
 
     return Decision(
         action=Action.REPLACE,
         rule_id="R-REPLACE",
         explanation=explanation,
-        scores={"new_score": s_new, "old_score": 1.0},
+        scores={"new_score": s_new, "old_score": old_score, "margin": margin},
+        mutations=mutations,
+        affected_memory_ids=affected_ids,
+    )
+
+
+def _produce_r_reject(
+    rc: ResolvedClaim,
+    live: list[Memory],
+    recorded_at: datetime,
+    s_new: float,
+    old_score: float,
+    reject_ratio: float,
+) -> Decision:
+    """Build an R-REJECT Decision storing the rejected claim for audit with contradicts edges."""
+    new_mem = NewMemory(
+        entity_id=rc.entity_id,
+        attribute=rc.attribute,
+        value_norm=rc.value_norm,
+        value_display=rc.value_display,
+        context=rc.claim.context,
+        context_key=rc.context_key,
+        valid_from=rc.valid_from,
+        valid_to=rc.valid_to,
+        closed_at=recorded_at,
+        status=MemoryStatus.REJECTED,
+        confidence=s_new,
+        raw_text=rc.claim.span or "",
+        message_id=rc.message_id,
+        source_id=rc.source.id,
+    )
+    new_evidence = NewEvidence(
+        source_id=rc.source.id,
+        message_id=rc.message_id,
+        strength=s_new,
+        observed_at=recorded_at,
+        span=rc.claim.span or "",
+    )
+    mutations: list[Mutation] = [InsertMemory(memory=new_mem, evidence=new_evidence)]
+    affected_ids = [m.id for m in live]
+    for old_m in live:
+        mutations.append(
+            AddEdge(
+                src="$new",
+                dst=old_m.id,
+                type=EdgeType.CONTRADICTS,
+                reason="rejected conflicting claim with insufficient trust",
+            )
+        )
+
+    explanation = (
+        f"Conflicting claim '{rc.value_norm}' rejected on attribute '{rc.attribute}': "
+        f"score {s_new:.3f} is below reject threshold {old_score * reject_ratio:.3f} "
+        f"(old_score={old_score:.3f}, reject_ratio={reject_ratio})."
+    )
+    return Decision(
+        action=Action.REJECT,
+        rule_id="R-REJECT",
+        explanation=explanation,
+        scores={
+            "new_score": s_new,
+            "old_score": old_score,
+            "reject_ratio": reject_ratio,
+        },
+        mutations=mutations,
+        affected_memory_ids=affected_ids,
+    )
+
+
+def _produce_r_dispute(
+    rc: ResolvedClaim,
+    live: list[Memory],
+    dep_targets: list[int],
+    recorded_at: datetime,
+    s_new: float,
+    old_score: float,
+    margin: float,
+    reject_ratio: float,
+    is_revert: bool = False,
+) -> Decision:
+    """Build an R-DISPUTE Decision placing both new and existing memories in dispute."""
+    new_mem = NewMemory(
+        entity_id=rc.entity_id,
+        attribute=rc.attribute,
+        value_norm=rc.value_norm,
+        value_display=rc.value_display,
+        context=rc.claim.context,
+        context_key=rc.context_key,
+        valid_from=rc.valid_from,
+        valid_to=rc.valid_to,
+        closed_at=recorded_at if rc.valid_to is not None else None,
+        status=MemoryStatus.DISPUTED,
+        confidence=s_new,
+        raw_text=rc.claim.span or "",
+        message_id=rc.message_id,
+        source_id=rc.source.id,
+    )
+    new_evidence = NewEvidence(
+        source_id=rc.source.id,
+        message_id=rc.message_id,
+        strength=s_new,
+        observed_at=recorded_at,
+        span=rc.claim.span or "",
+    )
+    mutations: list[Mutation] = [InsertMemory(memory=new_mem, evidence=new_evidence)]
+    affected_ids: list[int] = []
+    for old_m in live:
+        affected_ids.append(old_m.id)
+        mutations.append(
+            UpdateMemory(
+                memory_id=old_m.id,
+                fields={"status": MemoryStatus.DISPUTED},
+            )
+        )
+        mutations.append(
+            AddEdge(
+                src="$new",
+                dst=old_m.id,
+                type=EdgeType.CONTRADICTS,
+                reason="conflicting claims placed in dispute",
+            )
+        )
+
+    for target_id in dep_targets:
+        mutations.append(
+            AddEdge(
+                src="$new",
+                dst=target_id,
+                type=EdgeType.DEPENDS_ON,
+                reason="claim dependency",
+            )
+        )
+
+    live_ids_str = ", ".join(f"M{m_id}" for m_id in affected_ids)
+    if is_revert:
+        explanation = (
+            f"Potential reversion of attribute '{rc.attribute}' to '{rc.value_norm}' "
+            f"blocked by revert guard: score {s_new:.3f} < {old_score * margin:.3f} "
+            f"(revert_margin={margin}); placed in dispute."
+        )
+    else:
+        explanation = (
+            f"Conflicting claim '{rc.value_norm}' (score={s_new:.3f}) and existing memory "
+            f"{live_ids_str} (score={old_score:.3f}) placed in dispute."
+        )
+
+    return Decision(
+        action=Action.DISPUTE,
+        rule_id="R-DISPUTE",
+        explanation=explanation,
+        scores={
+            "new_score": s_new,
+            "old_score": old_score,
+            "margin": margin,
+            "reject_ratio": reject_ratio,
+        },
         mutations=mutations,
         affected_memory_ids=affected_ids,
     )

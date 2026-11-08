@@ -43,6 +43,7 @@ from memorymesh.models import (
     IngestReport,
     InsertMemory,
     Memory,
+    MemoryStatus,
     MemoryView,
     NewEvidence,
     QueryPlan,
@@ -350,6 +351,12 @@ class MemoryService:
                         if target_mem:
                             dep_targets.append(target_mem.id)
 
+                # Retrieve superseded ancestor values from the supersession graph
+                live_ids = [
+                    m.id for m in chain if m.status in (MemoryStatus.ACTIVE, MemoryStatus.DISPUTED)
+                ]
+                superseded_ancestor_values = self.repo.get_superseded_ancestor_values(live_ids)
+
                 decision = resolve(
                     rc=rc,
                     chain=chain,
@@ -358,6 +365,7 @@ class MemoryService:
                     classify=classify,
                     dep_targets=dep_targets,
                     recorded_at=eff_recorded_at,
+                    superseded_ancestor_values=superseded_ancestor_values,
                 )
 
                 # Apply mutations atomically in order
@@ -393,8 +401,7 @@ class MemoryService:
 
                 primary_mem_id = (
                     new_mem_id
-                    if decision.action
-                    in (Action.INSERT, Action.REPLACE, Action.COEXIST, Action.REFINE)
+                    if new_mem_id is not None
                     else (decision.affected_memory_ids[0] if decision.affected_memory_ids else None)
                 )
 
@@ -602,9 +609,22 @@ class MemoryService:
         *,
         now: datetime,
     ) -> Memory | None:
-        """Convenience method returning the single active Memory at now, or None."""
+        """Convenience method returning the single unambiguous ACTIVE Memory at now, or None.
+
+        If the query result contains disputed memories, multiple conflicting candidates,
+        or no active result, returns None to avoid treating disputed or ambiguous facts
+        as authoritative. Detailed results remain accessible via self.current().
+        """
         res = self.current(entity=entity, attribute=attribute, context=context, now=now)
-        return res.items[0].memory if res.items else None
+        # Any disputed memory in items means the attribute is under dispute
+        if any(item.memory.status == MemoryStatus.DISPUTED for item in res.items):
+            return None
+
+        active_items = [item for item in res.items if item.memory.status == MemoryStatus.ACTIVE]
+        if len(active_items) == 1:
+            return active_items[0].memory
+
+        return None
 
     def get_as_of(
         self,

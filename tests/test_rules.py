@@ -302,7 +302,7 @@ def test_r_replace_not_newer_claim_rejected(
 def test_same_time_validity_boundary_does_not_replace(
     sample_attribute: AttributeDef, sample_source: Source
 ) -> None:
-    """Equal valid_from timestamp does not allow R-REPLACE."""
+    """Equal valid_from timestamp does not allow R-REPLACE; produces R-DISPUTE under P3.2."""
     cfg = load_engine_config()
     t_same = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
 
@@ -338,16 +338,28 @@ def test_same_time_validity_boundary_does_not_replace(
         message_id=102,
     )
 
-    with pytest.raises(ConflictResolutionError, match="not newer"):
-        resolve(
-            rc=rc_same,
-            chain=[existing_mem],
-            schema=sample_attribute,
-            cfg=cfg,
-            classify=lambda _rc, _m: Relation.CONFLICTS,
-            dep_targets=[],
-            recorded_at=datetime(2026, 6, 1, 12, 5, tzinfo=UTC),
-        )
+    # When not strictly newer, REPLACE is forbidden regardless of trust; outcome is R-DISPUTE
+    decision = resolve(
+        rc=rc_same,
+        chain=[existing_mem],
+        schema=sample_attribute,
+        cfg=cfg,
+        classify=lambda _rc, _m: Relation.CONFLICTS,
+        dep_targets=[],
+        recorded_at=datetime(2026, 6, 1, 12, 5, tzinfo=UTC),
+    )
+
+    assert decision.action == Action.DISPUTE
+    assert decision.rule_id == "R-DISPUTE"
+    # Ensure existing memory is marked DISPUTED rather than HISTORICAL (not replaced)
+    update_muts = [m for m in decision.mutations if isinstance(m, UpdateMemory)]
+    assert len(update_muts) == 1
+    assert update_muts[0].memory_id == 1
+    assert update_muts[0].fields["status"] == MemoryStatus.DISPUTED
+    # Ensure newly created memory is DISPUTED
+    insert_muts = [m for m in decision.mutations if isinstance(m, InsertMemory)]
+    assert len(insert_muts) == 1
+    assert insert_muts[0].memory.status == MemoryStatus.DISPUTED
 
 
 def test_invalid_validity_window_inputs(
