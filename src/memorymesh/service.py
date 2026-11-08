@@ -8,13 +8,19 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from memorymesh.config import AppConfig, load_app_config
 from memorymesh.db import DEFAULT_DB_PATH, init_db
 from memorymesh.engine.classifier import classify_claim_memory
+from memorymesh.engine.confidence import (
+    calculate_base_confidence,
+    calculate_decay,
+    calculate_effective_confidence,
+    is_stale,
+)
 from memorymesh.engine.entity import (
     EntityCandidate,
     EntityResolutionAction,
@@ -23,21 +29,25 @@ from memorymesh.engine.entity import (
 )
 from memorymesh.engine.normalize import normalize_value
 from memorymesh.engine.rules import resolve
-from memorymesh.errors import NormalizationError, UnknownSourceError
+from memorymesh.errors import MemoryNotFoundError, NormalizationError, UnknownSourceError
 from memorymesh.models import (
     Action,
     AddEdge,
+    AddEvidence,
     AttributeDef,
     Cardinality,
     Claim,
     DecisionLogEntry,
+    Evidence,
     IngestMessage,
     IngestReport,
     InsertMemory,
     Memory,
     MemoryView,
+    NewEvidence,
     QueryPlan,
     QueryResult,
+    RecomputeConfidence,
     Relation,
     ResolvedClaim,
     Source,
@@ -67,8 +77,10 @@ class MemoryService:
         db_target: str | Path | sqlite3.Connection | Repository = DEFAULT_DB_PATH,
         cfg: AppConfig | None = None,
         llm: Any | None = None,
+        *,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
-        """Initialize MemoryService with a repository and configuration."""
+        """Initialize MemoryService with a repository, configuration, and optional clock."""
         if isinstance(db_target, Repository):
             self.repo = db_target
         elif isinstance(db_target, sqlite3.Connection):
@@ -79,6 +91,7 @@ class MemoryService:
 
         self.cfg = cfg or load_app_config()
         self.llm = llm
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     def _build_entity_candidates(self) -> list[EntityCandidate]:
         """Build candidate entities from both configuration and database."""
@@ -357,6 +370,16 @@ class MemoryService:
                         self.repo.insert_evidence(new_mem_id, mutation.evidence)
                     elif isinstance(mutation, UpdateMemory):
                         self.repo.update_memory(mutation.memory_id, mutation.fields)
+                    elif isinstance(mutation, AddEvidence):
+                        target_id = (
+                            new_mem_id if mutation.memory_id == "$new" else mutation.memory_id
+                        )
+                        self.repo.insert_evidence(target_id, mutation.evidence)
+                    elif isinstance(mutation, RecomputeConfidence):
+                        target_id = (
+                            new_mem_id if mutation.memory_id == "$new" else mutation.memory_id
+                        )
+                        self.recompute_confidence(target_id)
                     elif isinstance(mutation, AddEdge):
                         src_id = new_mem_id if mutation.src == "$new" else mutation.src
                         dst_id = new_mem_id if mutation.dst == "$new" else mutation.dst
@@ -441,18 +464,135 @@ class MemoryService:
             include_rejected=False,
         )
 
-        items = [
-            MemoryView(
-                memory=m,
-                effective_confidence=m.confidence,
-                is_stale=False,
-                source_names=[m.source_id],
-                scope_match="exact",
+        items = []
+        for m in memories:
+            attr_schema = self.repo.get_attribute_schema(m.attribute)
+            half_life = attr_schema.half_life_days if attr_schema else None
+            decay = calculate_decay(m.valid_from, req_valid_at, half_life)
+            eff_conf = calculate_effective_confidence(
+                m.confidence,
+                decay_factor=decay,
+                needs_review=m.needs_review,
+                review_penalty=self.cfg.engine.thresholds.review_penalty,
             )
-            for m in memories
-        ]
+            stale = is_stale(eff_conf, stale_floor=self.cfg.engine.thresholds.stale_floor)
+            source_names = list(
+                dict.fromkeys(
+                    [e.source_id for e in m.evidence] + ([m.source_id] if m.source_id else [])
+                )
+            )
+            items.append(
+                MemoryView(
+                    memory=m,
+                    effective_confidence=eff_conf,
+                    is_stale=stale,
+                    source_names=source_names,
+                    scope_match="exact",
+                )
+            )
         notes = [] if items else ["No memory valid at the requested time."]
         return QueryResult(plan=plan, items=items, notes=notes)
+
+    # =========================================================================
+    # Evidence & Confidence Operations
+    # =========================================================================
+
+    def add_evidence(
+        self,
+        memory_id: int,
+        evidence: NewEvidence,
+    ) -> Evidence:
+        """Add corroborating evidence to a memory and recompute its confidence atomically."""
+        with self.repo.transaction():
+            mem = self.repo.get_memory(memory_id)
+            if mem is None:
+                raise MemoryNotFoundError(f"Memory with ID {memory_id} does not exist.")
+
+            source = self.repo.get_source(evidence.source_id)
+            if source is None:
+                source_cfg = self.cfg.get_source(evidence.source_id)
+                if source_cfg is not None:
+                    source = Source(
+                        id=source_cfg.id,
+                        name=source_cfg.name,
+                        type=source_cfg.type.value
+                        if hasattr(source_cfg.type, "value")
+                        else str(source_cfg.type),
+                        reliability=source_cfg.reliability,
+                        notes=source_cfg.notes,
+                    )
+                    self.repo.insert_source(source)
+                else:
+                    raise UnknownSourceError(
+                        f"Unknown source '{evidence.source_id}'. "
+                        "Please configure it in sources.yaml."
+                    )
+
+            ev_id = self.repo.insert_evidence(memory_id, evidence)
+            self.recompute_confidence(memory_id)
+            persisted = self.repo.get_evidence(ev_id)
+            if persisted is None:
+                raise RuntimeError(f"Failed to retrieve persisted evidence {ev_id}.")
+            return persisted
+
+    def recompute_confidence(self, memory_id: int) -> float:
+        """Recompute a memory's base confidence from all its persisted evidence records."""
+        with self.repo.transaction():
+            mem = self.repo.get_memory(memory_id)
+            if mem is None:
+                raise MemoryNotFoundError(f"Memory with ID {memory_id} does not exist.")
+
+            evidence_list = self.repo.get_evidence_for_memory(memory_id)
+            new_conf = calculate_base_confidence(
+                evidence_list,
+                max_confidence=self.cfg.engine.thresholds.max_confidence,
+            )
+            self.repo.update_memory_confidence(memory_id, new_conf)
+            return new_conf
+
+    def get_effective_confidence(
+        self,
+        memory_id: int,
+        at: datetime | None = None,
+    ) -> float:
+        """Calculate effective confidence for a memory accounting for temporal decay and review.
+
+        Args:
+            memory_id: Target memory ID.
+            at: Query reference timestamp (timezone-aware). If omitted, defaults to the
+                current UTC time from the clock.
+
+        Returns:
+            Effective confidence score in [0.0, 1.0].
+        """
+        mem = self.repo.get_memory(memory_id)
+        if mem is None:
+            raise MemoryNotFoundError(f"Memory with ID {memory_id} does not exist.")
+
+        attr_def = self.repo.get_attribute_schema(mem.attribute)
+        half_life = attr_def.half_life_days if attr_def else None
+        if at is not None:
+            ref_time = at
+        else:
+            ref_time = self.clock()
+            if ref_time.tzinfo is None or ref_time.utcoffset() is None:
+                raise ValueError("Clock must return a timezone-aware datetime.")
+
+        decay = calculate_decay(mem.valid_from, ref_time, half_life)
+        return calculate_effective_confidence(
+            mem.confidence,
+            decay_factor=decay,
+            needs_review=mem.needs_review,
+            review_penalty=self.cfg.engine.thresholds.review_penalty,
+        )
+
+    def get_evidence(self, evidence_id: int) -> Evidence | None:
+        """Retrieve a single evidence row by ID."""
+        return self.repo.get_evidence(evidence_id)
+
+    def get_memory_evidence(self, memory_id: int) -> list[Evidence]:
+        """Retrieve all evidence records supporting a memory."""
+        return self.repo.get_evidence_for_memory(memory_id)
 
     def get_current(
         self,

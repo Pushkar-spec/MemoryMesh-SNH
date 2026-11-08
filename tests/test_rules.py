@@ -105,9 +105,9 @@ def test_r_insert_first_claim(sample_attribute: AttributeDef, sample_source: Sou
     assert mutation.memory.valid_to is None
     assert mutation.memory.closed_at is None
     assert mutation.memory.status == MemoryStatus.ACTIVE
-    assert mutation.memory.confidence == 1.0
+    assert mutation.memory.confidence == pytest.approx(0.9025)
     assert mutation.evidence.source_id == "sysadmin_priya"
-    assert mutation.evidence.strength == 1.0
+    assert mutation.evidence.strength == pytest.approx(0.9025)
 
 
 def test_r_insert_with_dependency_targets(

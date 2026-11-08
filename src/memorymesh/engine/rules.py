@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
+from typing import Any
 
 from memorymesh.config import EngineConfig
+from memorymesh.engine.confidence import calculate_base_confidence, calculate_strength
 from memorymesh.errors import (
     ConflictResolutionError,
     InvalidValidityWindowError,
@@ -19,6 +21,7 @@ from memorymesh.errors import (
 from memorymesh.models import (
     Action,
     AddEdge,
+    AddEvidence,
     AttributeDef,
     Cardinality,
     Decision,
@@ -83,6 +86,14 @@ def resolve(
             f"valid_from ({rc.valid_from})."
         )
 
+    # Calculate claim strength
+    s_new = (
+        calculate_strength(rc.source.reliability, rc.claim.extract_confidence)
+        if cfg.ablation.use_trust
+        else 1.0
+    )
+    s_new = min(cfg.thresholds.max_confidence, s_new)
+
     # 2. Filter candidate memories covering rc.valid_from
     cover = [m for m in chain if covers(m, rc.valid_from)]
     live = [m for m in cover if m.status in (MemoryStatus.ACTIVE, MemoryStatus.DISPUTED)]
@@ -95,20 +106,24 @@ def resolve(
                 rc=rc,
                 dep_targets=dep_targets,
                 recorded_at=recorded_at,
+                s_new=s_new,
             )
         raise ConflictResolutionError(
             "Cannot replace: claim is not newer than existing memory (prior to later fact). "
             "Backfilling into an earlier gap is deferred to Phase 6 (R-BACKFILL)."
         )
 
-    # 4. Multi-valued attribute resolution (R-COEXIST)
+    # 4. Multi-valued attribute resolution (R-COEXIST, R-CORROBORATE)
     if schema.cardinality == Cardinality.MULTI:
         for m in live:
             rel = classify(rc, m)
             if rel == Relation.IDENTICAL:
-                raise UnsupportedRelationError(
-                    f"Claim matches existing memory value '{m.value_norm}' (Relation.IDENTICAL). "
-                    "Corroborating existing memories is deferred to Phase 3 (R-CORROBORATE)."
+                return _produce_r_corroborate_or_dup(
+                    rc=rc,
+                    target=m,
+                    s_new=s_new,
+                    cfg=cfg,
+                    recorded_at=recorded_at,
                 )
 
         # Distinct values on multi-valued attributes coexist independently
@@ -117,15 +132,19 @@ def resolve(
             live=live,
             dep_targets=dep_targets,
             recorded_at=recorded_at,
+            s_new=s_new,
         )
 
-    # 5. Single-valued resolution (R-REPLACE, R-REFINE)
+    # 5. Single-valued resolution (R-CORROBORATE, R-REPLACE, R-REFINE)
     for m in live:
         rel = classify(rc, m)
         if rel == Relation.IDENTICAL:
-            raise UnsupportedRelationError(
-                f"Claim matches existing memory value '{m.value_norm}' (Relation.IDENTICAL). "
-                "Corroborating existing memories is deferred to Phase 3 (R-CORROBORATE)."
+            return _produce_r_corroborate_or_dup(
+                rc=rc,
+                target=m,
+                s_new=s_new,
+                cfg=cfg,
+                recorded_at=recorded_at,
             )
 
         if rel == Relation.REFINES:
@@ -142,6 +161,7 @@ def resolve(
                 live=live,
                 dep_targets=dep_targets,
                 recorded_at=recorded_at,
+                s_new=s_new,
             )
 
         if rel == Relation.CONFLICTS:
@@ -158,6 +178,7 @@ def resolve(
                 live=live,
                 dep_targets=dep_targets,
                 recorded_at=recorded_at,
+                s_new=s_new,
             )
 
         rel_str = rel.value if hasattr(rel, "value") else str(rel)
@@ -168,10 +189,90 @@ def resolve(
     raise ConflictResolutionError("No applicable rule matched candidate memories.")
 
 
+def _produce_r_corroborate_or_dup(
+    rc: ResolvedClaim,
+    target: Memory,
+    s_new: float,
+    cfg: EngineConfig,
+    recorded_at: datetime,
+) -> Decision:
+    """Build an R-CORROBORATE or R-DUP-SAME-SOURCE decision for an identical claim."""
+    new_ev = NewEvidence(
+        source_id=rc.source.id,
+        message_id=rc.message_id,
+        strength=s_new,
+        observed_at=recorded_at,
+        span=rc.claim.span or "",
+    )
+
+    # Collect distinct sources that have already provided evidence for this memory
+    existing_sources = {e.source_id for e in target.evidence}
+    if target.source_id:
+        existing_sources.add(target.source_id)
+
+    old_conf = float(target.confidence)
+
+    if rc.source.id in existing_sources:
+        # Same source: a source cannot corroborate itself.
+        # Evidence is recorded, but confidence remains unchanged.
+        mutations: list[Mutation] = [
+            AddEvidence(memory_id=target.id, evidence=new_ev),
+        ]
+        explanation = (
+            f"Claim value '{rc.value_norm}' from same source '{rc.source.id}' "
+            f"corroborates existing memory M{target.id} without confidence boost."
+        )
+        return Decision(
+            action=Action.CORROBORATE,
+            rule_id="R-DUP-SAME-SOURCE",
+            explanation=explanation,
+            scores={"new_score": s_new, "old_score": old_conf, "confidence": old_conf},
+            mutations=mutations,
+            affected_memory_ids=[target.id],
+        )
+
+    # Different source: corroboration raises confidence via noisy-OR aggregation
+    existing_ev: list[Any] = list(target.evidence)
+    if not existing_ev and target.source_id:
+        existing_ev.append(
+            NewEvidence(
+                source_id=target.source_id,
+                message_id=target.message_id,
+                strength=old_conf,
+                observed_at=target.recorded_at,
+                span=target.raw_text,
+            )
+        )
+
+    all_evidence = existing_ev + [new_ev]
+    new_conf = calculate_base_confidence(
+        all_evidence,
+        max_confidence=cfg.thresholds.max_confidence,
+    )
+
+    mutations = [
+        AddEvidence(memory_id=target.id, evidence=new_ev),
+        UpdateMemory(memory_id=target.id, fields={"confidence": new_conf}),
+    ]
+    explanation = (
+        f"Claim value '{rc.value_norm}' from source '{rc.source.id}' "
+        f"corroborates existing memory M{target.id} (confidence {old_conf:.3f} -> {new_conf:.3f})."
+    )
+    return Decision(
+        action=Action.CORROBORATE,
+        rule_id="R-CORROBORATE",
+        explanation=explanation,
+        scores={"new_score": s_new, "old_score": old_conf, "confidence": new_conf},
+        mutations=mutations,
+        affected_memory_ids=[target.id],
+    )
+
+
 def _produce_r_insert(
     rc: ResolvedClaim,
     dep_targets: list[int],
     recorded_at: datetime,
+    s_new: float = 1.0,
 ) -> Decision:
     """Build an R-INSERT Decision."""
     new_mem = NewMemory(
@@ -185,7 +286,7 @@ def _produce_r_insert(
         valid_to=rc.valid_to,
         closed_at=recorded_at if rc.valid_to is not None else None,
         status=MemoryStatus.ACTIVE,
-        confidence=1.0,  # Hard-coded trust 1.0 for P1.1
+        confidence=s_new,
         raw_text=rc.claim.span or "",
         message_id=rc.message_id,
         source_id=rc.source.id,
@@ -193,9 +294,9 @@ def _produce_r_insert(
     new_evidence = NewEvidence(
         source_id=rc.source.id,
         message_id=rc.message_id,
-        strength=1.0,
+        strength=s_new,
         observed_at=recorded_at,
-        span=rc.claim.span,
+        span=rc.claim.span or "",
     )
 
     mutations: list[Mutation] = [InsertMemory(memory=new_mem, evidence=new_evidence)]
@@ -216,7 +317,7 @@ def _produce_r_insert(
         explanation=(
             f"Initial claim for {rc.claim.subject}.{rc.attribute} (no existing candidate memory)."
         ),
-        scores={"new_score": 1.0},
+        scores={"new_score": s_new},
         mutations=mutations,
         affected_memory_ids=[],
     )
@@ -227,6 +328,7 @@ def _produce_r_replace(
     live: list[Memory],
     dep_targets: list[int],
     recorded_at: datetime,
+    s_new: float = 1.0,
 ) -> Decision:
     """Build an R-REPLACE Decision closing existing memory windows at rc.valid_from."""
     new_mem = NewMemory(
@@ -240,7 +342,7 @@ def _produce_r_replace(
         valid_to=rc.valid_to,
         closed_at=recorded_at if rc.valid_to is not None else None,
         status=MemoryStatus.ACTIVE,
-        confidence=1.0,
+        confidence=s_new,
         raw_text=rc.claim.span or "",
         message_id=rc.message_id,
         source_id=rc.source.id,
@@ -248,9 +350,9 @@ def _produce_r_replace(
     new_evidence = NewEvidence(
         source_id=rc.source.id,
         message_id=rc.message_id,
-        strength=1.0,
+        strength=s_new,
         observed_at=recorded_at,
-        span=rc.claim.span,
+        span=rc.claim.span or "",
     )
 
     mutations: list[Mutation] = [InsertMemory(memory=new_mem, evidence=new_evidence)]
@@ -297,7 +399,7 @@ def _produce_r_replace(
         action=Action.REPLACE,
         rule_id="R-REPLACE",
         explanation=explanation,
-        scores={"new_score": 1.0, "old_score": 1.0},
+        scores={"new_score": s_new, "old_score": 1.0},
         mutations=mutations,
         affected_memory_ids=affected_ids,
     )
@@ -308,6 +410,7 @@ def _produce_r_coexist(
     live: list[Memory],
     dep_targets: list[int],
     recorded_at: datetime,
+    s_new: float = 1.0,
 ) -> Decision:
     """Build an R-COEXIST Decision inserting a new memory on a multi-valued attribute."""
     new_mem = NewMemory(
@@ -321,7 +424,7 @@ def _produce_r_coexist(
         valid_to=rc.valid_to,
         closed_at=recorded_at if rc.valid_to is not None else None,
         status=MemoryStatus.ACTIVE,
-        confidence=1.0,
+        confidence=s_new,
         raw_text=rc.claim.span or "",
         message_id=rc.message_id,
         source_id=rc.source.id,
@@ -329,9 +432,9 @@ def _produce_r_coexist(
     new_evidence = NewEvidence(
         source_id=rc.source.id,
         message_id=rc.message_id,
-        strength=1.0,
+        strength=s_new,
         observed_at=recorded_at,
-        span=rc.claim.span,
+        span=rc.claim.span or "",
     )
 
     mutations: list[Mutation] = [InsertMemory(memory=new_mem, evidence=new_evidence)]
@@ -356,7 +459,7 @@ def _produce_r_coexist(
         action=Action.COEXIST,
         rule_id="R-COEXIST",
         explanation=explanation,
-        scores={"new_score": 1.0},
+        scores={"new_score": s_new},
         mutations=mutations,
         affected_memory_ids=coexisting_ids,
     )
@@ -367,6 +470,7 @@ def _produce_r_refine(
     live: list[Memory],
     dep_targets: list[int],
     recorded_at: datetime,
+    s_new: float = 1.0,
 ) -> Decision:
     """Build an R-REFINE Decision superseding coarser live memories with a more specific value."""
     new_mem = NewMemory(
@@ -380,7 +484,7 @@ def _produce_r_refine(
         valid_to=rc.valid_to,
         closed_at=recorded_at if rc.valid_to is not None else None,
         status=MemoryStatus.ACTIVE,
-        confidence=1.0,
+        confidence=s_new,
         raw_text=rc.claim.span or "",
         message_id=rc.message_id,
         source_id=rc.source.id,
@@ -388,9 +492,9 @@ def _produce_r_refine(
     new_evidence = NewEvidence(
         source_id=rc.source.id,
         message_id=rc.message_id,
-        strength=1.0,
+        strength=s_new,
         observed_at=recorded_at,
-        span=rc.claim.span,
+        span=rc.claim.span or "",
     )
 
     mutations: list[Mutation] = [InsertMemory(memory=new_mem, evidence=new_evidence)]
@@ -440,7 +544,7 @@ def _produce_r_refine(
         action=Action.REFINE,
         rule_id="R-REFINE",
         explanation=explanation,
-        scores={"new_score": 1.0, "old_score": 1.0},
+        scores={"new_score": s_new, "old_score": 1.0},
         mutations=mutations,
         affected_memory_ids=affected_ids,
     )

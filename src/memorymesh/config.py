@@ -84,7 +84,7 @@ class ThresholdsConfig(BaseModel):
     replace_margin: float = Field(ge=0.0)
     reject_ratio: float = Field(ge=0.0, le=1.0)
     revert_margin: float = Field(ge=0.0)
-    max_confidence: float = Field(ge=0.0, le=1.0)
+    max_confidence: float = Field(gt=0.0, le=1.0)
     review_penalty: float = Field(ge=0.0, le=1.0)
     stale_floor: float = Field(ge=0.0, le=1.0)
     dispute_autoresolve_ratio: float = Field(ge=0.0, le=1.0)

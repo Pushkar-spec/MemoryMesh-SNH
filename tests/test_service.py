@@ -11,11 +11,7 @@ import pytest
 
 from memorymesh.config import load_app_config
 from memorymesh.db import init_db
-from memorymesh.errors import (
-    ConflictResolutionError,
-    UnknownSourceError,
-    UnsupportedRelationError,
-)
+from memorymesh.errors import UnknownSourceError
 from memorymesh.models import (
     Action,
     AttributeDef,
@@ -504,17 +500,17 @@ def test_identical_claim_on_different_message_raises_unsupported_relation(
         extract_confidence=0.95,
     )
 
-    with pytest.raises(
-        (UnsupportedRelationError, ConflictResolutionError),
-        match="IDENTICAL.*deferred to Phase 3.*R-CORROBORATE",
-    ):
-        service.ingest_claims(msg2, [claim2], recorded_at=t2)
+    rep2 = service.ingest_claims(msg2, [claim2], recorded_at=t2)
+    assert len(rep2.decisions) == 1
+    assert rep2.decisions[0].action == Action.CORROBORATE
+    assert rep2.decisions[0].rule_id == "R-DUP-SAME-SOURCE"
 
-    # 4. Verify existing memory remains active and uncorrupted
+    # 4. Verify existing memory remains active and uncorrupted, with two evidence rows
     m1 = service.repo.get_memory(m1_id)  # type: ignore[arg-type]
     assert m1 is not None
     assert m1.status == MemoryStatus.ACTIVE
     assert m1.value_norm == "3.10"
+    assert len(service.repo.get_evidence_for_memory(m1_id)) == 2
 
 
 def test_ingest_claims_normalizes_value(service: MemoryService) -> None:
@@ -669,11 +665,11 @@ def test_ingest_claims_classifies_legacy_unnormalized_memory(service: MemoryServ
         value="3.12",
         extract_confidence=0.95,
     )
-    with pytest.raises(
-        (UnsupportedRelationError, ConflictResolutionError),
-        match="IDENTICAL.*deferred to Phase 3.*R-CORROBORATE",
-    ):
-        service.ingest_claims(msg2, [claim_identical], recorded_at=t2)
+    rep_ident = service.ingest_claims(msg2, [claim_identical], recorded_at=t2)
+    assert len(rep_ident.decisions) == 1
+    assert rep_ident.decisions[0].action == Action.CORROBORATE
+    assert rep_ident.decisions[0].rule_id == "R-DUP-SAME-SOURCE"
+    assert len(service.repo.get_evidence_for_memory(mem_id)) == 1
 
     # 2. Incoming claim with conflicting "3.14" against legacy "v3.12"
     # Classifies as CONFLICTS, replacing the legacy memory via R-REPLACE

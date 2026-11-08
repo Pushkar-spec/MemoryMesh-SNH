@@ -13,7 +13,7 @@ import pytest
 from memorymesh.config import load_engine_config
 from memorymesh.db import init_db
 from memorymesh.engine.rules import resolve
-from memorymesh.errors import ConflictResolutionError, UnsupportedRelationError
+from memorymesh.errors import ConflictResolutionError
 from memorymesh.models import (
     Action,
     AddEdge,
@@ -320,8 +320,21 @@ class TestRefineServiceEndToEnd:
             value="3.12",
             extract_confidence=0.95,
         )
-        with pytest.raises(UnsupportedRelationError, match="Relation.IDENTICAL"):
-            service.ingest_claims(msg2, [claim2], recorded_at=t2)
+        report2 = service.ingest_claims(msg2, [claim2], recorded_at=t2)
+        assert len(report2.decisions) == 1
+        assert report2.decisions[0].action == Action.CORROBORATE
+        assert report2.decisions[0].rule_id == "R-DUP-SAME-SOURCE"
+
+        # Verify only one active memory exists
+        ent = service.repo.get_entity_by_name("Server A")
+        assert ent is not None
+        mems = service.repo.find_memories(
+            entity_id=int(ent["id"]),
+            attribute="python_version",
+        )
+        assert len(mems) == 1
+        assert mems[0].value_norm == "3.12.4"
+        assert mems[0].status == MemoryStatus.ACTIVE
 
     def test_peer_version_triggers_replace_not_refine(self, service: MemoryService) -> None:
         """3.12.4 followed by 3.12.5 is CONFLICT, not REFINE, so triggers R-REPLACE."""

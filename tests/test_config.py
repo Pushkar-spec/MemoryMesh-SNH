@@ -279,3 +279,59 @@ def test_llm_provider_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "invalid_provider")
     with pytest.raises(ConfigValidationError):
         load_engine_config()
+
+
+def test_confidence_threshold_configuration_validation() -> None:
+    """Verify that invalid confidence parameters in ThresholdsConfig are rejected."""
+    # Valid baseline parameters
+    base_kwargs = {
+        "min_extract_confidence": 0.40,
+        "replace_margin": 0.80,
+        "reject_ratio": 0.50,
+        "revert_margin": 1.00,
+        "max_confidence": 0.99,
+        "review_penalty": 0.50,
+        "stale_floor": 0.30,
+        "dispute_autoresolve_ratio": 0.50,
+    }
+
+    # max_confidence must be strictly positive and <= 1.0
+    with pytest.raises(ValidationError):
+        ThresholdsConfig(**{**base_kwargs, "max_confidence": 0.0})
+    with pytest.raises(ValidationError):
+        ThresholdsConfig(**{**base_kwargs, "max_confidence": -0.1})
+    with pytest.raises(ValidationError):
+        ThresholdsConfig(**{**base_kwargs, "max_confidence": 1.1})
+
+    # review_penalty in [0.0, 1.0]
+    with pytest.raises(ValidationError):
+        ThresholdsConfig(**{**base_kwargs, "review_penalty": -0.1})
+    with pytest.raises(ValidationError):
+        ThresholdsConfig(**{**base_kwargs, "review_penalty": 1.1})
+
+    # stale_floor in [0.0, 1.0]
+    with pytest.raises(ValidationError):
+        ThresholdsConfig(**{**base_kwargs, "stale_floor": -0.1})
+    with pytest.raises(ValidationError):
+        ThresholdsConfig(**{**base_kwargs, "stale_floor": 1.1})
+
+
+def test_attribute_half_life_validation() -> None:
+    """Verify that non-positive half_life_days values are rejected in AttributeConfig."""
+    with pytest.raises(ValidationError):
+        AttributeConfig(
+            attribute="test",
+            description="test",
+            cardinality=Cardinality.SINGLE,
+            value_type=ValueType.TEXT,
+            half_life_days=0.0,
+        )
+
+    with pytest.raises(ValidationError):
+        AttributeConfig(
+            attribute="test",
+            description="test",
+            cardinality=Cardinality.SINGLE,
+            value_type=ValueType.TEXT,
+            half_life_days=-14.0,
+        )

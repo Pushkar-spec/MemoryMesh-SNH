@@ -199,11 +199,15 @@ def run_demo(stream: Any = sys.stdout) -> int:
         )
 
         print("Query: Current python_version for Server A", file=stream)
-        print(f"  Value      : {active_mem.value_norm}", file=stream)
-        print(f"  Status     : {active_mem.status.value}", file=stream)
-        print(f"  Valid From : {act_vfrom}", file=stream)
-        print(f"  Valid To   : {act_vto}", file=stream)
-        print(f"  Confidence : {active_mem.confidence}", file=stream)
+        print(f"  Value               : {active_mem.value_norm}", file=stream)
+        print(f"  Status              : {active_mem.status.value}", file=stream)
+        print(f"  Valid From          : {act_vfrom}", file=stream)
+        print(f"  Valid To            : {act_vto}", file=stream)
+        print(f"  Base Confidence     : {active_mem.confidence}", file=stream)
+        print(
+            f"  Effective Confidence: {cur_result.items[0].effective_confidence}",
+            file=stream,
+        )
         print(file=stream)
 
         if active_mem.value_norm != "3.12":
@@ -233,11 +237,15 @@ def run_demo(stream: Any = sys.stdout) -> int:
         hist_vto = format_datetime_utc(hist_mem.valid_to) if hist_mem.valid_to else "None"
 
         print(f"Query: python_version for Server A valid on {t_hist_str}", file=stream)
-        print(f"  Value      : {hist_mem.value_norm}", file=stream)
-        print(f"  Status     : {hist_mem.status.value}", file=stream)
-        print(f"  Valid From : {hist_vfrom}", file=stream)
-        print(f"  Valid To   : {hist_vto}", file=stream)
-        print(f"  Confidence : {hist_mem.confidence}", file=stream)
+        print(f"  Value               : {hist_mem.value_norm}", file=stream)
+        print(f"  Status              : {hist_mem.status.value}", file=stream)
+        print(f"  Valid From          : {hist_vfrom}", file=stream)
+        print(f"  Valid To            : {hist_vto}", file=stream)
+        print(f"  Base Confidence     : {hist_mem.confidence}", file=stream)
+        print(
+            f"  Effective Confidence: {hist_result.items[0].effective_confidence}",
+            file=stream,
+        )
         print(file=stream)
 
         if hist_mem.value_norm != "3.10":

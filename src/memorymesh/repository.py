@@ -311,6 +311,13 @@ class Repository:
             },
         )
 
+    def update_memory_confidence(self, memory_id: int, confidence: float) -> None:
+        """Update a memory's persisted base confidence score."""
+        conf_val = float(confidence)
+        if not (0.0 <= conf_val <= 1.0):
+            raise RepositoryError(f"Confidence must be between 0.0 and 1.0, got {conf_val}.")
+        self.update_memory(memory_id, {"confidence": conf_val})
+
     def get_memory_chain(
         self,
         entity_id: int,
@@ -420,7 +427,26 @@ class Repository:
     # =========================================================================
 
     def insert_evidence(self, memory_id: int, evidence: NewEvidence | Evidence) -> int:
-        """Insert an evidence row associated with a memory and return its ID."""
+        """Insert an evidence row associated with a memory and return its ID.
+
+        If an identical evidence row for (memory_id, source_id, message_id, span) already
+        exists, returns the existing evidence ID without creating a duplicate.
+        """
+        str_val = float(evidence.strength)
+        if not (0.0 <= str_val <= 1.0):
+            raise RepositoryError(f"Evidence strength must be between 0.0 and 1.0, got {str_val}.")
+
+        # Idempotency check: preserve existing evidence and avoid duplicate records
+        existing = self.conn.execute(
+            """
+            SELECT id FROM evidence
+            WHERE memory_id = ? AND source_id = ? AND message_id = ? AND span = ?
+            """,
+            (memory_id, evidence.source_id, evidence.message_id, evidence.span or ""),
+        ).fetchone()
+        if existing is not None:
+            return int(existing["id"])
+
         sql = """
         INSERT INTO evidence (memory_id, source_id, message_id, strength, observed_at, span)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -430,7 +456,7 @@ class Repository:
             memory_id,
             evidence.source_id,
             evidence.message_id,
-            float(evidence.strength),
+            str_val,
             observed_str,
             evidence.span or "",
         )
@@ -443,6 +469,22 @@ class Repository:
                     f"Foreign key constraint failed on evidence insertion: {exc}"
                 ) from exc
             raise RepositoryError(f"Database integrity error: {exc}") from exc
+
+    def get_evidence(self, evidence_id: int) -> Evidence | None:
+        """Retrieve a single evidence row by ID."""
+        sql = "SELECT * FROM evidence WHERE id = ?"
+        row = self.conn.execute(sql, (evidence_id,)).fetchone()
+        if row is None:
+            return None
+        return Evidence(
+            id=int(row["id"]),
+            memory_id=int(row["memory_id"]),
+            source_id=str(row["source_id"]),
+            message_id=int(row["message_id"]),
+            strength=float(row["strength"]),
+            observed_at=parse_db_datetime(row["observed_at"]),  # type: ignore[arg-type]
+            span=str(row["span"] or ""),
+        )
 
     def get_evidence_for_memory(self, memory_id: int) -> list[Evidence]:
         """Retrieve all evidence rows linked to a specific memory ID."""
