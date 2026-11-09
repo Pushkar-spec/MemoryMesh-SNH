@@ -27,6 +27,13 @@ from memorymesh.engine.entity import (
     normalize_entity_name,
     resolve_entity,
 )
+from memorymesh.engine.invariants import (
+    INV_CLOSED_AT_REQUIRED,
+    INV_VALID_INTERVAL,
+    check_intervals_overlap,
+    validate_confidence_recomputation,
+    validate_temporal_window,
+)
 from memorymesh.engine.normalize import normalize_value
 from memorymesh.engine.rules import resolve
 from memorymesh.errors import MemoryNotFoundError, NormalizationError, UnknownSourceError
@@ -44,6 +51,8 @@ from memorymesh.models import (
     IngestMessage,
     IngestReport,
     InsertMemory,
+    InvariantReport,
+    InvariantViolation,
     Memory,
     MemoryStatus,
     MemoryView,
@@ -799,3 +808,361 @@ class MemoryService:
             now=valid_at,
         )
         return res.items[0].memory if res.items else None
+
+    # =========================================================================
+    # P4.1: Decision Log, Explain, and Invariant Checks
+    # =========================================================================
+
+    def get_decision_logs(
+        self,
+        memory_id: int | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[DecisionLogEntry]:
+        """Retrieve decision log history chronologically.
+
+        If memory_id is provided, returns all decisions where the memory was
+        either the primary subject or an affected memory, up to limit.
+        Raises MemoryNotFoundError if memory_id does not exist.
+        If memory_id is None, returns all decisions up to limit.
+        """
+        if memory_id is not None:
+            mem = self.repo.get_memory(memory_id)
+            if mem is None:
+                raise MemoryNotFoundError(f"Memory with id={memory_id} not found.")
+            return self.repo.get_decision_logs_for_memory(memory_id, limit=limit, offset=offset)
+
+        return self.repo.get_all_decision_logs(limit=limit, offset=offset)
+
+    def explain(self, memory_id: int) -> QueryResult:
+        """Answer 'Why does this memory exist in its current state?' deterministically.
+
+        Inspects persisted state: memory view, evidence, decision history,
+        graph edges, and dispute status. Strictly read-only without creating
+        new decision logs or modifying state.
+        """
+        mem = self.repo.get_memory(memory_id)
+        if mem is None:
+            raise MemoryNotFoundError(f"Memory with id={memory_id} not found.")
+
+        ref_time = self.clock()
+        if ref_time.tzinfo is None or ref_time.utcoffset() is None:
+            raise ValueError("Clock must return a timezone-aware datetime.")
+        ref_time = ref_time.astimezone(UTC)
+
+        view = self._build_memory_view(mem, ref_time=ref_time)
+        decisions = self.repo.get_decision_logs_for_memory(memory_id)
+        edges = self.repo.get_edges_for_memory(memory_id, direction="both")
+
+        # Check for active disputes involving this memory
+        disputes: list[DisputeView] = []
+        if mem.status == MemoryStatus.DISPUTED:
+            disputed_pairs = self.repo.find_disputed_pairs(
+                entity_id=mem.entity_id,
+                attribute=mem.attribute,
+                context_key=mem.context_key,
+            )
+            disputes = [
+                DisputeView(
+                    a=self._build_memory_view(pair[0], ref_time),
+                    b=self._build_memory_view(pair[1], ref_time),
+                    edge_reason=pair[2],
+                )
+                for pair in disputed_pairs
+                if pair[0].id == memory_id or pair[1].id == memory_id
+            ]
+
+        # Compose deterministic explanation notes
+        notes: list[str] = [
+            f"Memory M{mem.id} is currently {mem.status.value.upper()}.",
+            (
+                f"Base confidence is {mem.confidence:.4f}; "
+                f"effective confidence at {ref_time.isoformat()} is "
+                f"{view.effective_confidence:.4f} (stale={view.is_stale})."
+            ),
+        ]
+        if mem.needs_review:
+            notes.append(f"Review required: {mem.review_reason or 'Flagged for human review'}.")
+        if mem.evidence:
+            notes.append(
+                f"Supported by {len(mem.evidence)} evidence record(s) from source(s): "
+                f"{', '.join(view.source_names) or 'unknown'}."
+            )
+        else:
+            notes.append("No supporting evidence records found.")
+
+        if decisions:
+            notes.append(
+                f"Associated with {len(decisions)} decision log entry/entries. "
+                f"Most recent decision: {decisions[-1].action.value} via "
+                f"{decisions[-1].rule_id}."
+            )
+        else:
+            notes.append("No associated decision log entries found.")
+
+        if edges:
+            edge_descs: list[str] = []
+            for e in edges:
+                other_id = e.dst_memory_id if e.src_memory_id == mem.id else e.src_memory_id
+                edge_descs.append(f"{e.type.value} with M{other_id}")
+            notes.append(f"Connected by {len(edges)} edge(s): {', '.join(edge_descs)}.")
+
+        if disputes:
+            notes.append(f"Memory is actively involved in {len(disputes)} dispute(s).")
+
+        plan = QueryPlan(
+            intent="why",
+            entity=mem.entity_name,
+            attribute=mem.attribute,
+            context=mem.context or {},
+            valid_at=mem.valid_from,
+            memory_id=mem.id,
+        )
+
+        return QueryResult(
+            plan=plan,
+            items=[view],
+            rejected_claims=[view] if mem.status == MemoryStatus.REJECTED else [],
+            disputes=disputes,
+            decisions=decisions,
+            edges=edges,
+            notes=notes,
+        )
+
+    def check_invariants(self) -> InvariantReport:
+        """Run read-only integrity checks across all persisted invariants.
+
+        Verifies 8 key structural and business invariants without modifying state:
+        - INV-CLOSED-AT-REQUIRED: Memories with valid_to must have closed_at set.
+        - INV-VALID-INTERVAL: valid_to must be strictly greater than valid_from.
+        - INV-NO-ACTIVE-OVERLAP: Single-valued attributes have no overlapping active windows.
+        - INV-REJECTED-EXCLUDED: Rejected memories are never returned by normal retrieval.
+        - INV-CONFIDENCE-CONSISTENT: Stored base confidence matches noisy-OR recomputation.
+        - INV-IDEMPOTENT-INGEST: Verified via deduplication state / non-mutative structure.
+        - INV-FOREIGN-KEY-INTEGRITY: Edges, logs, and evidence reference valid memories.
+        - INV-SOURCE-ATTRIBUTE-INTEGRITY: References to sources, entities, and attributes exist.
+        """
+        violations: list[InvariantViolation] = []
+
+        # Total checked is the sum of persisted records audited across all invariants:
+        # memories (temporal windows, overlap, confidence, rejected exclusion)
+        # + messages (deduplication key uniqueness)
+        # + edges (foreign-key targets)
+        # + decision_log (memory_id / affected_ids references)
+        # + evidence (memory_id / source_id references)
+        record_counts = self.repo.get_record_counts()
+        total_checked = sum(record_counts.values())
+
+        # Load all memories
+        all_memories = self.repo.get_all_memories(include_evidence=True)
+
+        # 1. INV-CLOSED-AT-REQUIRED & 2. INV-VALID-INTERVAL
+        for mem in all_memories:
+            for violation in validate_temporal_window(mem.valid_from, mem.valid_to, mem.closed_at):
+                if violation.code == INV_CLOSED_AT_REQUIRED:
+                    violations.append(
+                        InvariantViolation(
+                            invariant_id=violation.code,
+                            description=(
+                                f"Memory M{mem.id} has valid_to set "
+                                f"({mem.valid_to.isoformat() if mem.valid_to else None}) "
+                                f"but closed_at is NULL."
+                            ),
+                            affected_ids=[mem.id],
+                            details={
+                                "memory_id": mem.id,
+                                "valid_to": mem.valid_to.isoformat() if mem.valid_to else None,
+                                "closed_at": None,
+                            },
+                        )
+                    )
+                elif violation.code == INV_VALID_INTERVAL:
+                    violations.append(
+                        InvariantViolation(
+                            invariant_id=violation.code,
+                            description=(
+                                f"Memory M{mem.id} valid_to "
+                                f"({mem.valid_to.isoformat() if mem.valid_to else None}) is not "
+                                f"strictly greater than valid_from ({mem.valid_from.isoformat()})."
+                            ),
+                            affected_ids=[mem.id],
+                            details={
+                                "memory_id": mem.id,
+                                "valid_from": mem.valid_from.isoformat(),
+                                "valid_to": mem.valid_to.isoformat() if mem.valid_to else None,
+                            },
+                        )
+                    )
+
+        # 3. INV-NO-ACTIVE-OVERLAP
+        # Single-valued attributes: no two ACTIVE memories for the same
+        # entity_id, attribute, and context_key may have overlapping validity intervals
+        active_single_valued: dict[tuple[int, str, str], list[Memory]] = {}
+        for mem in all_memories:
+            if mem.status == MemoryStatus.ACTIVE:
+                attr_def = self.repo.get_attribute_schema(mem.attribute)
+                is_single = attr_def.cardinality == Cardinality.SINGLE if attr_def else True
+                if is_single:
+                    key = (mem.entity_id, mem.attribute, mem.context_key)
+                    active_single_valued.setdefault(key, []).append(mem)
+
+        for key, mem_list in active_single_valued.items():
+            if len(mem_list) > 1:
+                for i in range(len(mem_list)):
+                    for j in range(i + 1, len(mem_list)):
+                        m1 = mem_list[i]
+                        m2 = mem_list[j]
+                        if check_intervals_overlap(
+                            m1.valid_from, m1.valid_to, m2.valid_from, m2.valid_to
+                        ):
+                            violations.append(
+                                InvariantViolation(
+                                    invariant_id="INV-NO-ACTIVE-OVERLAP",
+                                    description=(
+                                        f"Active single-valued memories M{m1.id} and M{m2.id} "
+                                        f"overlap for entity_id={key[0]}, attribute='{key[1]}', "
+                                        f"context='{key[2]}'."
+                                    ),
+                                    affected_ids=[m1.id, m2.id],
+                                    details={
+                                        "entity_id": key[0],
+                                        "attribute": key[1],
+                                        "context_key": key[2],
+                                        "m1_window": [
+                                            m1.valid_from.isoformat(),
+                                            m1.valid_to.isoformat() if m1.valid_to else None,
+                                        ],
+                                        "m2_window": [
+                                            m2.valid_from.isoformat(),
+                                            m2.valid_to.isoformat() if m2.valid_to else None,
+                                        ],
+                                    },
+                                )
+                            )
+
+        # 4. INV-REJECTED-EXCLUDED
+        # Normal retrieval must never return memories with status == REJECTED
+        rejected_memories = [m for m in all_memories if m.status == MemoryStatus.REJECTED]
+        for rm in rejected_memories:
+            # Ensure known_at >= recorded_at so temporal/belief conditions don't filter out
+            # backfilled claims before checking the rejected-status filter
+            if rm.recorded_at.tzinfo is None or rm.recorded_at.utcoffset() is None:
+                raise ValueError(
+                    f"Memory M{rm.id} has invalid timezone-naive recorded_at: {rm.recorded_at}. "
+                    "All persisted timestamps must be timezone-aware."
+                )
+            known_at = rm.recorded_at.astimezone(UTC)
+            retrieved = retrieve_valid_memories(
+                repo=self.repo,
+                entity_id=rm.entity_id,
+                attribute=rm.attribute,
+                valid_at=rm.valid_from,
+                known_at=known_at,
+                context=rm.context,
+                include_rejected=False,
+            )
+            retrieved_ids = [m.id for m in retrieved]
+            if rm.id in retrieved_ids:
+                violations.append(
+                    InvariantViolation(
+                        invariant_id="INV-REJECTED-EXCLUDED",
+                        description=(
+                            f"Rejected memory M{rm.id} was returned by retrieve_valid_memories "
+                            f"with include_rejected=False."
+                        ),
+                        affected_ids=[rm.id],
+                        details={"memory_id": rm.id, "retrieved_ids": retrieved_ids},
+                    )
+                )
+
+        # 5. INV-CONFIDENCE-CONSISTENT
+        # Stored base confidence matches noisy-OR recomputation within tolerance (1e-4)
+        max_conf = self.cfg.engine.thresholds.max_confidence
+        for mem in all_memories:
+            mismatch = validate_confidence_recomputation(
+                mem.confidence, mem.evidence, max_confidence=max_conf, tolerance=1e-4
+            )
+            if mismatch is not None:
+                violations.append(
+                    InvariantViolation(
+                        invariant_id="INV-CONFIDENCE-CONSISTENT",
+                        description=(
+                            f"Memory M{mem.id} stored confidence ({mem.confidence:.4f}) does not "
+                            f"match recomputed evidence confidence ({mismatch:.4f})."
+                        ),
+                        affected_ids=[mem.id],
+                        details={
+                            "memory_id": mem.id,
+                            "stored_confidence": mem.confidence,
+                            "expected_confidence": mismatch,
+                            "evidence_count": len(mem.evidence),
+                        },
+                    )
+                )
+
+        # 6. INV-IDEMPOTENT-INGEST
+        # Check message uniqueness if messages exist
+        msg_rows = self.repo.get_message_integrity_records()
+        seen_keys: dict[tuple[str, str, str], int] = {}
+        for mr in msg_rows:
+            key = (str(mr["source_id"]), str(mr["text_hash"]), str(mr["event_time"]))
+            mid = int(mr["id"])
+            if key in seen_keys:
+                violations.append(
+                    InvariantViolation(
+                        invariant_id="INV-IDEMPOTENT-INGEST",
+                        description=(
+                            f"Duplicate message key {key} found in messages "
+                            f"(id={mid} and id={seen_keys[key]})."
+                        ),
+                        affected_ids=[mid, seen_keys[key]],
+                        details={"key": list(key), "message_ids": [seen_keys[key], mid]},
+                    )
+                )
+            else:
+                seen_keys[key] = mid
+
+        # 7. INV-FOREIGN-KEY-INTEGRITY
+        dangling_refs = self.repo.find_dangling_references()
+        for dr in dangling_refs:
+            ref_type = dr["type"]
+            affected: list[int] = []
+            if "src_memory_id" in dr:
+                affected.append(int(dr["src_memory_id"]))
+            if "dst_memory_id" in dr:
+                affected.append(int(dr["dst_memory_id"]))
+            if "memory_id" in dr:
+                affected.append(int(dr["memory_id"]))
+            if "affected_id" in dr:
+                affected.append(int(dr["affected_id"]))
+
+            violations.append(
+                InvariantViolation(
+                    invariant_id="INV-FOREIGN-KEY-INTEGRITY",
+                    description=(
+                        f"Dangling reference detected ({ref_type}) in record {dr.get('id')}."
+                    ),
+                    affected_ids=affected,
+                    details=dr,
+                )
+            )
+
+        # 8. INV-SOURCE-ATTRIBUTE-INTEGRITY
+        schema_violations = self.repo.find_schema_integrity_violations()
+        for sv in schema_violations:
+            sv_type = sv["type"]
+            mem_id = int(sv["id"]) if "id" in sv else 0
+            violations.append(
+                InvariantViolation(
+                    invariant_id="INV-SOURCE-ATTRIBUTE-INTEGRITY",
+                    description=f"Schema integrity violation ({sv_type}) in record {mem_id}.",
+                    affected_ids=[mem_id] if mem_id else [],
+                    details=sv,
+                )
+            )
+
+        return InvariantReport(
+            is_valid=(len(violations) == 0),
+            total_checked=total_checked,
+            violations=violations,
+        )

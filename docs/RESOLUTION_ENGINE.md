@@ -250,7 +250,23 @@ Example: query `{environment: staging}` returns the staging memory (3.11), not t
 - `rejected` memories are returned only for `history` and `why` intents, under `rejected_claims`.
 
 ### 6.3 Why and Impact
-- **Why:** evidence rows (source, strength, span), decision log rows where `memory_id` or `affected_memory_ids` contains the memory, and edges (`supersedes`, `contradicts`, `refines`, `depends_on`).
+- **Why (`service.explain(memory_id)`):** Answers "Why does this memory exist in its current state?" deterministically and without mutation:
+  - Memory view with effective confidence evaluated at current reference time (including decay and review penalties).
+  - Evidence records supporting the memory with sources and strengths.
+  - Decision log entries where `memory_id` matches or is contained in `affected_memory_ids`, sorted chronologically (`created_at ASC, id ASC`).
+  - Graph relationship edges (`supersedes`, `contradicts`, `refines`, `depends_on`).
+  - Active dispute pairs if the memory is currently under dispute.
+  - Explanatory notes summarizing state, confidence, evidence sources, rule history, and review flags.
+- **Decision Log Retrieval (`service.get_decision_logs(memory_id, limit, offset)`):** Provides chronological audit history. When `memory_id` is supplied, matches records where the memory was either the primary subject or an affected member, with optional limit and pagination offset.
+- **Invariant Checks (`service.check_invariants()`):** Strictly read-only audit procedure returning structured `InvariantReport` (with `total_checked` reflecting the count of domain records across memories, messages, edges, decisions, and evidence evaluated) verifying 8 core invariants:
+  1. `INV-CLOSED-AT-REQUIRED`: Memories with `valid_to` must have `closed_at` set.
+  2. `INV-VALID-INTERVAL`: Valid interval must satisfy `valid_to > valid_from`.
+  3. `INV-NO-ACTIVE-OVERLAP`: Single-valued attributes have non-overlapping active validity intervals for the same entity, attribute, and context.
+  4. `INV-REJECTED-EXCLUDED`: Rejected memories are excluded from normal current-state and as-of retrieval.
+  5. `INV-CONFIDENCE-CONSISTENT`: Stored base confidence matches noisy-OR recomputation from supporting evidence within 1e-4 tolerance.
+  6. `INV-IDEMPOTENT-INGEST`: Passive duplicate-key consistency across committed messages (behavioral idempotency—that duplicate ingestion creates no additional memories and returns duplicate=True—is verified dynamically by the test suite).
+  7. `INV-FOREIGN-KEY-INTEGRITY`: Edges, decision log references, and evidence records point to existing memory records.
+  8. `INV-SOURCE-ATTRIBUTE-INTEGRITY`: References to entities, attribute definitions, and sources exist in the database catalogs.
 - **Impact:** `propagate`-style traversal without writing, returning `ImpactItem` with the dependency path.
 
 ---

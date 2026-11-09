@@ -931,23 +931,293 @@ class Repository:
         persisted_id = cursor.lastrowid or 0
         return entry.model_copy(update={"id": persisted_id})
 
+    def _row_to_decision_log(self, r: sqlite3.Row) -> DecisionLogEntry:
+        """Convert a database row into a DecisionLogEntry domain object."""
+        return DecisionLogEntry(
+            id=int(r["id"]),
+            message_id=int(r["message_id"]),
+            claim_json=json.loads(r["claim_json"]),
+            action=Action(r["action"]),
+            rule_id=str(r["rule_id"]),
+            memory_id=int(r["memory_id"]) if r["memory_id"] is not None else None,
+            affected_memory_ids=json.loads(r["affected_ids_json"]),
+            scores=json.loads(r["scores_json"]),
+            explanation=str(r["explanation"]),
+            created_at=parse_db_datetime(r["created_at"]),  # type: ignore[arg-type]
+        )
+
     def get_decision_logs_for_message(self, message_id: int) -> list[DecisionLogEntry]:
         """Retrieve decision log entries for a given message ID."""
         sql = "SELECT * FROM decision_log WHERE message_id = ? ORDER BY id ASC"
         cursor = self.conn.execute(sql, (message_id,))
         rows = cursor.fetchall()
-        return [
-            DecisionLogEntry(
-                id=int(r["id"]),
-                message_id=int(r["message_id"]),
-                claim_json=json.loads(r["claim_json"]),
-                action=Action(r["action"]),
-                rule_id=str(r["rule_id"]),
-                memory_id=int(r["memory_id"]) if r["memory_id"] is not None else None,
-                affected_memory_ids=json.loads(r["affected_ids_json"]),
-                scores=json.loads(r["scores_json"]),
-                explanation=str(r["explanation"]),
-                created_at=parse_db_datetime(r["created_at"]),  # type: ignore[arg-type]
+        return [self._row_to_decision_log(r) for r in rows]
+
+    def get_decision_log(self, decision_id: int) -> DecisionLogEntry | None:
+        """Retrieve a single decision log entry by ID."""
+        sql = "SELECT * FROM decision_log WHERE id = ?"
+        row = self.conn.execute(sql, (decision_id,)).fetchone()
+        return self._row_to_decision_log(row) if row else None
+
+    def get_decision_logs_for_memory(
+        self,
+        memory_id: int,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[DecisionLogEntry]:
+        """Retrieve decision logs associated with a memory as primary or affected target."""
+        base_sql = """
+        SELECT DISTINCT d.*
+        FROM decision_log d
+        WHERE d.memory_id = ?
+           OR EXISTS (
+               SELECT 1 FROM json_each(d.affected_ids_json) WHERE value = ?
+           )
+        ORDER BY d.created_at ASC, d.id ASC
+        """
+        if limit is not None:
+            sql = f"{base_sql}\nLIMIT ? OFFSET ?"
+            cursor = self.conn.execute(sql, (memory_id, memory_id, limit, offset))
+        elif offset > 0:
+            sql = f"{base_sql}\nLIMIT -1 OFFSET ?"
+            cursor = self.conn.execute(sql, (memory_id, memory_id, offset))
+        else:
+            cursor = self.conn.execute(base_sql, (memory_id, memory_id))
+        rows = cursor.fetchall()
+        return [self._row_to_decision_log(r) for r in rows]
+
+    def get_all_decision_logs(
+        self,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[DecisionLogEntry]:
+        """Retrieve all decision log entries ordered chronologically with stable tie-breaker."""
+        if limit is not None:
+            sql = "SELECT * FROM decision_log ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?"
+            cursor = self.conn.execute(sql, (limit, offset))
+        elif offset > 0:
+            sql = "SELECT * FROM decision_log ORDER BY created_at ASC, id ASC LIMIT -1 OFFSET ?"
+            cursor = self.conn.execute(sql, (offset,))
+        else:
+            sql = "SELECT * FROM decision_log ORDER BY created_at ASC, id ASC"
+            cursor = self.conn.execute(sql)
+        rows = cursor.fetchall()
+        return [self._row_to_decision_log(r) for r in rows]
+
+    def get_all_memories(self, include_evidence: bool = True) -> list[Memory]:
+        """Retrieve all memories in the database ordered by id ASC."""
+        sql = """
+        SELECT m.*, e.canonical_name AS entity_name
+        FROM memories m
+        LEFT JOIN entities e ON m.entity_id = e.id
+        ORDER BY m.id ASC
+        """
+        rows = self.conn.execute(sql).fetchall()
+        return [self._row_to_memory(r, include_evidence=include_evidence) for r in rows]
+
+    def find_temporal_window_violations(self) -> list[dict[str, Any]]:
+        """Find memories violating valid_to/closed_at constraints."""
+        sql = """
+        SELECT id, valid_from, valid_to, closed_at
+        FROM memories
+        WHERE (valid_to IS NOT NULL AND closed_at IS NULL)
+           OR (valid_to IS NOT NULL AND valid_to <= valid_from)
+        ORDER BY id ASC
+        """
+        rows = self.conn.execute(sql).fetchall()
+        return [dict(r) for r in rows]
+
+    def find_overlapping_active_windows(self) -> list[dict[str, Any]]:
+        """Find pairs of active single-valued memories with overlapping validity windows."""
+        sql = """
+        SELECT
+            m1.id AS id1,
+            m2.id AS id2,
+            m1.entity_id,
+            m1.attribute,
+            m1.context_key,
+            m1.valid_from AS valid_from1,
+            m1.valid_to AS valid_to1,
+            m2.valid_from AS valid_from2,
+            m2.valid_to AS valid_to2
+        FROM memories m1
+        JOIN memories m2 ON (
+            m1.entity_id = m2.entity_id
+            AND m1.attribute = m2.attribute
+            AND m1.context_key = m2.context_key
+            AND m1.id < m2.id
+        )
+        JOIN attribute_schema a ON m1.attribute = a.attribute
+        WHERE a.cardinality = 'single'
+          AND m1.status = 'active'
+          AND m2.status = 'active'
+          AND m1.valid_from < COALESCE(m2.valid_to, '9999-12-31T23:59:59Z')
+          AND m2.valid_from < COALESCE(m1.valid_to, '9999-12-31T23:59:59Z')
+        ORDER BY m1.id ASC, m2.id ASC
+        """
+        rows = self.conn.execute(sql).fetchall()
+        return [dict(r) for r in rows]
+
+    def find_dangling_references(self) -> list[dict[str, Any]]:
+        """Find dangling or broken references across relationships and decision logs."""
+        violations: list[dict[str, Any]] = []
+
+        # Dangling edges
+        sql_edges = """
+        SELECT id, src_memory_id, dst_memory_id
+        FROM edges
+        WHERE src_memory_id NOT IN (SELECT id FROM memories)
+           OR dst_memory_id NOT IN (SELECT id FROM memories)
+        """
+        for r in self.conn.execute(sql_edges).fetchall():
+            violations.append(
+                {
+                    "type": "dangling_edge",
+                    "id": int(r["id"]),
+                    "src_memory_id": int(r["src_memory_id"]),
+                    "dst_memory_id": int(r["dst_memory_id"]),
+                }
             )
-            for r in rows
-        ]
+
+        # Dangling decision_log memory_id
+        sql_decisions = """
+        SELECT id, memory_id
+        FROM decision_log
+        WHERE memory_id IS NOT NULL
+          AND memory_id NOT IN (SELECT id FROM memories)
+        """
+        for r in self.conn.execute(sql_decisions).fetchall():
+            violations.append(
+                {
+                    "type": "dangling_decision_memory",
+                    "id": int(r["id"]),
+                    "memory_id": int(r["memory_id"]),
+                }
+            )
+
+        # Dangling decision_log affected_ids
+        sql_affected = """
+        SELECT DISTINCT d.id, j.value AS affected_id
+        FROM decision_log d, json_each(d.affected_ids_json) j
+        WHERE j.value NOT IN (SELECT id FROM memories)
+        """
+        for r in self.conn.execute(sql_affected).fetchall():
+            violations.append(
+                {
+                    "type": "dangling_decision_affected",
+                    "id": int(r["id"]),
+                    "affected_id": int(r["affected_id"]),
+                }
+            )
+
+        # Dangling evidence memory_id
+        sql_evidence = """
+        SELECT id, memory_id
+        FROM evidence
+        WHERE memory_id NOT IN (SELECT id FROM memories)
+        """
+        for r in self.conn.execute(sql_evidence).fetchall():
+            violations.append(
+                {
+                    "type": "dangling_evidence_memory",
+                    "id": int(r["id"]),
+                    "memory_id": int(r["memory_id"]),
+                }
+            )
+
+        return violations
+
+    def find_schema_integrity_violations(self) -> list[dict[str, Any]]:
+        """Find references to non-existent entities, attributes, or sources."""
+        violations: list[dict[str, Any]] = []
+
+        # Memories referencing non-existent entities
+        sql_ent = """
+        SELECT id, entity_id
+        FROM memories
+        WHERE entity_id NOT IN (SELECT id FROM entities)
+        """
+        for r in self.conn.execute(sql_ent).fetchall():
+            violations.append(
+                {
+                    "type": "invalid_entity",
+                    "id": int(r["id"]),
+                    "entity_id": int(r["entity_id"]),
+                }
+            )
+
+        # Memories referencing non-existent attributes
+        sql_attr = """
+        SELECT id, attribute
+        FROM memories
+        WHERE attribute NOT IN (SELECT attribute FROM attribute_schema)
+        """
+        for r in self.conn.execute(sql_attr).fetchall():
+            violations.append(
+                {
+                    "type": "invalid_attribute",
+                    "id": int(r["id"]),
+                    "attribute": str(r["attribute"]),
+                }
+            )
+
+        # Memories referencing non-existent sources
+        sql_src = """
+        SELECT id, source_id
+        FROM memories
+        WHERE source_id IS NOT NULL
+          AND source_id NOT IN (SELECT id FROM sources)
+        """
+        for r in self.conn.execute(sql_src).fetchall():
+            violations.append(
+                {
+                    "type": "invalid_memory_source",
+                    "id": int(r["id"]),
+                    "source_id": str(r["source_id"]),
+                }
+            )
+
+        # Evidence referencing non-existent sources
+        sql_ev_src = """
+        SELECT id, memory_id, source_id
+        FROM evidence
+        WHERE source_id NOT IN (SELECT id FROM sources)
+        """
+        for r in self.conn.execute(sql_ev_src).fetchall():
+            violations.append(
+                {
+                    "type": "invalid_evidence_source",
+                    "id": int(r["id"]),
+                    "memory_id": int(r["memory_id"]),
+                    "source_id": str(r["source_id"]),
+                }
+            )
+
+        return violations
+
+    def get_message_integrity_records(self) -> list[dict[str, Any]]:
+        """Retrieve message identification records for deduplication integrity checks."""
+        sql = "SELECT id, source_id, text_hash, event_time FROM messages ORDER BY id ASC"
+        cursor = self.conn.execute(sql)
+        return [dict(r) for r in cursor.fetchall()]
+
+    def get_record_counts(self) -> dict[str, int]:
+        """Return row counts for primary domain tables audited by invariant checks.
+
+        Evaluates primary transactional and audit tables:
+        - memories
+        - messages
+        - edges
+        - decision_log
+        - evidence
+
+        Excludes static catalog and reference tables (sources, attribute_schema,
+        entities, entity_aliases), which serve as reference targets rather than
+        audited assertions.
+        """
+        counts: dict[str, int] = {}
+        for tbl in ["memories", "messages", "edges", "decision_log", "evidence"]:
+            cursor = self.conn.execute(f"SELECT COUNT(*) AS c FROM {tbl}")
+            row = cursor.fetchone()
+            counts[tbl] = int(row["c"]) if row else 0
+        return counts

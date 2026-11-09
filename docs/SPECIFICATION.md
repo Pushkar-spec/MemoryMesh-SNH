@@ -244,7 +244,19 @@ class QueryResult(BaseModel):
     disputes: list[DisputeView] = []
     impact: list[ImpactItem] = []
     decisions: list[DecisionLogEntry] = []
+    edges: list[Edge] = []
     notes: list[str] = []                    # e.g. "no memory valid at that time"
+
+class InvariantViolation(BaseModel):
+    invariant_id: str                        # e.g. "INV-NO-ACTIVE-OVERLAP"
+    description: str
+    affected_ids: list[int] = []
+    details: dict[str, Any] = {}
+
+class InvariantReport(BaseModel):
+    is_valid: bool
+    total_checked: int                       # total primary records (memories, messages, edges, decisions, evidence) audited; excludes catalog/reference tables
+    violations: list[InvariantViolation] = []
 
 class FinalAnswer(BaseModel):
     """Identical schema for MemoryMesh and the naive-RAG baseline (fair grading)."""
@@ -292,6 +304,9 @@ class MemoryService:
                 valid_at: datetime | None = None, known_at: datetime | None = None, *, now: datetime) -> QueryResult
     def history(self, entity: str, attribute: str, context: dict[str, str] | None = None) -> QueryResult
     def explain(self, memory_id: int) -> QueryResult                                # evidence + decisions + edges
+    def get_decision_logs(self, memory_id: int | None = None, limit: int | None = None,
+                          offset: int = 0) -> list[DecisionLogEntry]
+    def check_invariants(self) -> InvariantReport                                  # read-only integrity checks
     def impact(self, memory_id: int) -> list[ImpactItem]
     def disputes(self, entity: str | None = None) -> list[DisputeView]
     def ask(self, question: str, *, now: datetime) -> AskResult                     # parse -> retrieve -> compose

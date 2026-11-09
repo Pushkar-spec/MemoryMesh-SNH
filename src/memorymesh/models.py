@@ -390,6 +390,7 @@ class QueryResult(MeshBaseModel):
     disputes: list[DisputeView] = Field(default_factory=list)
     impact: list[ImpactItem] = Field(default_factory=list)
     decisions: list[DecisionLogEntry] = Field(default_factory=list)
+    edges: list[Edge] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -420,3 +421,26 @@ class IngestReport(MeshBaseModel):
     duplicate: bool = False
     claims_extracted: int
     decisions: list[DecisionLogEntry] = Field(default_factory=list)
+
+
+class InvariantViolation(MeshBaseModel):
+    """Structured violation reported by the invariant checker."""
+
+    invariant_id: str
+    description: str
+    affected_ids: list[int] = Field(default_factory=list)
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class InvariantReport(MeshBaseModel):
+    """Structured outcome of running data integrity invariant checks.
+
+    total_checked represents the total count of primary domain records evaluated
+    across memories, messages, edges, decision_log, and evidence. Reference and
+    catalog tables (sources, attribute_schema, entities, entity_aliases) serve as
+    reference targets and are excluded from this count.
+    """
+
+    is_valid: bool
+    total_checked: int = 0
+    violations: list[InvariantViolation] = Field(default_factory=list)
