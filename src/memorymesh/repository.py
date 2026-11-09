@@ -10,7 +10,7 @@ import hashlib
 import json
 import sqlite3
 import uuid
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -552,17 +552,148 @@ class Repository:
             cursor = self.conn.execute(sql, (memory_id, memory_id))
 
         rows = cursor.fetchall()
-        return [
-            Edge(
-                id=int(r["id"]),
-                src_memory_id=int(r["src_memory_id"]),
-                dst_memory_id=int(r["dst_memory_id"]),
-                type=EdgeType(r["type"]),
-                reason=str(r["reason"] or ""),
-                created_at=parse_db_datetime(r["created_at"]),  # type: ignore[arg-type]
+        return [self._row_to_edge(r) for r in rows]
+
+    def _row_to_edge(self, r: sqlite3.Row) -> Edge:
+        """Convert a database row into an Edge domain object."""
+        return Edge(
+            id=int(r["id"]),
+            src_memory_id=int(r["src_memory_id"]),
+            dst_memory_id=int(r["dst_memory_id"]),
+            type=EdgeType(r["type"]),
+            reason=str(r["reason"] or ""),
+            created_at=parse_db_datetime(r["created_at"]),  # type: ignore[arg-type]
+        )
+
+    def get_dependency_edges(
+        self,
+        memory_id: int,
+        direction: Literal["dependencies", "dependents", "both"] = "both",
+    ) -> list[Edge]:
+        """Retrieve DEPENDS_ON relationship edges.
+
+        Convention:
+            dependent --DEPENDS_ON--> upstream
+            src_memory_id = dependent (downstream)
+            dst_memory_id = upstream (foundation)
+
+        Args:
+            memory_id: Target memory ID.
+            direction:
+                - 'dependencies': memories that memory_id depends on
+                - 'dependents': memories that depend on memory_id
+                - 'both': either direction
+        """
+        if direction == "dependencies":
+            sql = (
+                "SELECT * FROM edges "
+                "WHERE src_memory_id = ? AND type = 'depends_on' "
+                "ORDER BY id ASC"
             )
-            for r in rows
-        ]
+            cursor = self.conn.execute(sql, (memory_id,))
+        elif direction == "dependents":
+            sql = (
+                "SELECT * FROM edges "
+                "WHERE dst_memory_id = ? AND type = 'depends_on' "
+                "ORDER BY id ASC"
+            )
+            cursor = self.conn.execute(sql, (memory_id,))
+        else:
+            sql = (
+                "SELECT * FROM edges "
+                "WHERE (src_memory_id = ? OR dst_memory_id = ?) AND type = 'depends_on' "
+                "ORDER BY id ASC"
+            )
+            cursor = self.conn.execute(sql, (memory_id, memory_id))
+
+        rows = cursor.fetchall()
+        return [self._row_to_edge(r) for r in rows]
+
+    def get_transitive_dependency_edges(
+        self,
+        root_ids: Sequence[int],
+        direction: Literal["downstream", "upstream"] = "downstream",
+    ) -> list[Edge]:
+        """Retrieve transitive DEPENDS_ON edges reachable from root_ids.
+
+        Uses recursive CTE with automatic edge deduplication across cycles.
+
+        Args:
+            root_ids: Starting memory IDs.
+            direction:
+                - 'downstream': trace dependents of root_ids
+                - 'upstream': trace foundations of root_ids
+        """
+        if not root_ids:
+            return []
+
+        id_list = list(root_ids)
+        placeholders = ",".join("?" for _ in id_list)
+
+        if direction == "downstream":
+            sql = f"""
+            WITH RECURSIVE dep_graph(edge_id, src_id, dst_id) AS (
+                SELECT id, src_memory_id, dst_memory_id
+                FROM edges
+                WHERE dst_memory_id IN ({placeholders}) AND type = 'depends_on'
+                UNION
+                SELECT e.id, e.src_memory_id, e.dst_memory_id
+                FROM edges e
+                JOIN dep_graph dg ON e.dst_memory_id = dg.src_id
+                WHERE e.type = 'depends_on'
+            )
+            SELECT e.*
+            FROM edges e
+            JOIN (SELECT DISTINCT edge_id FROM dep_graph) dg ON e.id = dg.edge_id
+            ORDER BY e.id ASC;
+            """
+        else:
+            sql = f"""
+            WITH RECURSIVE dep_graph(edge_id, src_id, dst_id) AS (
+                SELECT id, src_memory_id, dst_memory_id
+                FROM edges
+                WHERE src_memory_id IN ({placeholders}) AND type = 'depends_on'
+                UNION
+                SELECT e.id, e.src_memory_id, e.dst_memory_id
+                FROM edges e
+                JOIN dep_graph dg ON e.src_memory_id = dg.dst_id
+                WHERE e.type = 'depends_on'
+            )
+            SELECT e.*
+            FROM edges e
+            JOIN (SELECT DISTINCT edge_id FROM dep_graph) dg ON e.id = dg.edge_id
+            ORDER BY e.id ASC;
+            """
+
+        cursor = self.conn.execute(sql, id_list)
+        rows = cursor.fetchall()
+        return [self._row_to_edge(r) for r in rows]
+
+    def get_memories_by_ids(
+        self,
+        memory_ids: Sequence[int],
+        include_evidence: bool = False,
+    ) -> list[Memory]:
+        """Retrieve memories matching the given IDs in deterministic ID order."""
+        if not memory_ids:
+            return []
+
+        id_list = sorted(set(memory_ids))
+        placeholders = ",".join("?" for _ in id_list)
+        sql = f"""
+        SELECT m.*, e.canonical_name AS entity_name
+        FROM memories m
+        LEFT JOIN entities e ON m.entity_id = e.id
+        WHERE m.id IN ({placeholders})
+        ORDER BY m.id ASC
+        """
+        rows = self.conn.execute(sql, id_list).fetchall()
+        return [self._row_to_memory(r, include_evidence=include_evidence) for r in rows]
+
+    def mark_memory_for_review(self, memory_id: int, review_reason: str) -> None:
+        """Mark a memory as requiring review due to dependency propagation."""
+        sql = "UPDATE memories SET needs_review = 1, review_reason = ? WHERE id = ?"
+        self.conn.execute(sql, (review_reason, memory_id))
 
     def get_superseded_ancestor_values(self, memory_ids: list[int] | set[int]) -> set[str]:
         """Retrieve historical values superseded by memory_ids through the supersession chain.
@@ -900,6 +1031,12 @@ class Repository:
         row = cursor.fetchone()
         return int(row["id"]) if row else None
 
+    def get_message(self, message_id: int) -> dict[str, Any] | None:
+        """Retrieve a message record by primary key ID."""
+        sql = "SELECT * FROM messages WHERE id = ?"
+        row = self.conn.execute(sql, (message_id,)).fetchone()
+        return dict(row) if row else None
+
     def insert_decision_log(self, entry: DecisionLogEntry) -> DecisionLogEntry:
         """Insert a decision log row and return the persisted entry with its generated ID."""
         sql = """
@@ -930,6 +1067,49 @@ class Repository:
         )
         persisted_id = cursor.lastrowid or 0
         return entry.model_copy(update={"id": persisted_id})
+
+    def has_propagation_decision_log(
+        self,
+        memory_id: int,
+        upstream_id: int,
+        message_id: int,
+        cause: str | None = None,
+        event_id: str | None = None,
+        trigger_mode: str | None = None,
+    ) -> bool:
+        """Check if an R-PROPAGATE decision log already exists for a specific propagation event.
+
+        Identity of a propagation event:
+        - memory_id: the dependent memory flagged for review
+        - upstream_id: the changed root memory causing the propagation
+        - message_id: the message attributed to this event
+        - trigger_mode (if provided): invocation mode ("automatic" vs "manual")
+        - event_id (if provided): explicit stable event identifier
+        - cause (if event_id omitted): the cause text characterizing this event
+        """
+        conditions = [
+            "rule_id = 'R-PROPAGATE'",
+            "memory_id = ?",
+            "message_id = ?",
+            "json_extract(claim_json, '$.upstream_memory_id') = ?",
+        ]
+        params: list[Any] = [memory_id, message_id, upstream_id]
+
+        if trigger_mode is not None:
+            conditions.append("json_extract(claim_json, '$.trigger_mode') = ?")
+            params.append(trigger_mode)
+
+        if event_id is not None:
+            conditions.append("json_extract(claim_json, '$.event_id') = ?")
+            params.append(event_id)
+        elif cause is not None:
+            conditions.append("json_extract(claim_json, '$.cause') = ?")
+            params.append(cause)
+
+        where_clause = " AND ".join(conditions)
+        sql = f"SELECT 1 FROM decision_log WHERE {where_clause} LIMIT 1"
+        row = self.conn.execute(sql, params).fetchone()
+        return row is not None
 
     def _row_to_decision_log(self, r: sqlite3.Row) -> DecisionLogEntry:
         """Convert a database row into a DecisionLogEntry domain object."""

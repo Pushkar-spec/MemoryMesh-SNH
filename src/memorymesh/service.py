@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -35,8 +35,19 @@ from memorymesh.engine.invariants import (
     validate_temporal_window,
 )
 from memorymesh.engine.normalize import normalize_value
+from memorymesh.engine.propagate import (
+    compute_propagation,
+    resolve_direct_dependencies,
+    resolve_direct_dependents,
+    resolve_transitive_dependents,
+)
 from memorymesh.engine.rules import resolve
-from memorymesh.errors import MemoryNotFoundError, NormalizationError, UnknownSourceError
+from memorymesh.errors import (
+    ForeignKeyConstraintError,
+    MemoryNotFoundError,
+    NormalizationError,
+    UnknownSourceError,
+)
 from memorymesh.models import (
     Action,
     AddEdge,
@@ -431,6 +442,27 @@ class MemoryService:
                 saved_log = self.repo.insert_decision_log(log_entry)
                 decisions_log.append(saved_log)
 
+                # P5.1: Propagate changes downstream if an existing memory was affected
+                if decision.rule_id in ("R-REPLACE", "R-DISPUTE", "R-RETRACT"):
+                    changed_ids = [
+                        m_id for m_id in decision.affected_memory_ids if m_id != new_mem_id
+                    ]
+                    if changed_ids:
+                        if decision.rule_id == "R-REPLACE":
+                            cause = f"superseded by M{new_mem_id}" if new_mem_id else "superseded"
+                        elif decision.rule_id == "R-DISPUTE":
+                            cause = "placed in dispute"
+                        else:
+                            cause = "retracted"
+                        prop_logs = self.propagate_change(
+                            changed_ids=changed_ids,
+                            cause_text=cause,
+                            recorded_at=eff_recorded_at,
+                            message_id=message_id,
+                            trigger_mode="automatic",
+                        )
+                        decisions_log.extend(prop_logs)
+
             return IngestReport(
                 message_id=message_id,
                 duplicate=False,
@@ -543,6 +575,18 @@ class MemoryService:
                 created_at=eff_recorded_at,
             )
             saved_log = self.repo.insert_decision_log(log_entry)
+
+            # P5.1: Propagate changes downstream for closed dispute losers
+            loser_ids = [loser.id for loser in losers]
+            if loser_ids:
+                self.propagate_change(
+                    changed_ids=loser_ids,
+                    cause_text=f"superseded by dispute winner M{winner.id}",
+                    recorded_at=eff_recorded_at,
+                    message_id=winner.message_id,
+                    trigger_mode="automatic",
+                )
+
             return saved_log
 
     # =========================================================================
@@ -808,6 +852,207 @@ class MemoryService:
             now=valid_at,
         )
         return res.items[0].memory if res.items else None
+
+    # =========================================================================
+    # P5.1: Dependency Resolution and Propagation
+    # =========================================================================
+
+    def get_dependencies(self, memory_id: int) -> list[Memory]:
+        """Retrieve direct upstream memories that memory_id depends on.
+
+        Edge: memory_id --DEPENDS_ON--> upstream.
+        Raises MemoryNotFoundError if memory_id does not exist.
+        Returns memories in deterministic id ASC order.
+        """
+        mem = self.repo.get_memory(memory_id)
+        if mem is None:
+            raise MemoryNotFoundError(f"Memory with id={memory_id} not found.")
+
+        edges = self.repo.get_dependency_edges(memory_id, direction="dependencies")
+        upstream_ids = resolve_direct_dependencies(edges, memory_id)
+        return self.repo.get_memories_by_ids(upstream_ids)
+
+    def get_dependents(self, memory_id: int) -> list[Memory]:
+        """Retrieve direct downstream memories that depend on memory_id.
+
+        Edge: dependent --DEPENDS_ON--> memory_id.
+        Raises MemoryNotFoundError if memory_id does not exist.
+        Returns memories in deterministic id ASC order.
+        """
+        mem = self.repo.get_memory(memory_id)
+        if mem is None:
+            raise MemoryNotFoundError(f"Memory with id={memory_id} not found.")
+
+        edges = self.repo.get_dependency_edges(memory_id, direction="dependents")
+        downstream_ids = resolve_direct_dependents(edges, memory_id)
+        return self.repo.get_memories_by_ids(downstream_ids)
+
+    def get_transitive_dependents(self, memory_id: int) -> list[tuple[Memory, list[int]]]:
+        """Retrieve all reachable downstream dependent memories using cycle-safe traversal.
+
+        Raises MemoryNotFoundError if memory_id does not exist.
+        Returns list of (dependent_memory, dependency_path) in deterministic discovery order.
+        """
+        mem = self.repo.get_memory(memory_id)
+        if mem is None:
+            raise MemoryNotFoundError(f"Memory with id={memory_id} not found.")
+
+        edges = self.repo.get_transitive_dependency_edges([memory_id], direction="downstream")
+        pairs = resolve_transitive_dependents(edges, memory_id)
+        if not pairs:
+            return []
+
+        dep_ids = [p[0] for p in pairs]
+        memories = self.repo.get_memories_by_ids(dep_ids)
+        mem_map = {m.id: m for m in memories}
+
+        return [(mem_map[dep_id], path) for dep_id, path in pairs if dep_id in mem_map]
+
+    def propagate_change(
+        self,
+        changed_ids: Sequence[int],
+        cause_text: str,
+        *,
+        recorded_at: datetime | None = None,
+        message_id: int | None = None,
+        trigger_mode: Literal["automatic", "manual"] = "manual",
+        event_id: str | None = None,
+    ) -> list[DecisionLogEntry]:
+        """Propagate an upstream change through the dependency graph.
+
+        For every affected downstream memory (active or disputed):
+        - Marks memory as needs_review=True with an explainable review_reason.
+        - Preserves factual content, evidence, and confidence.
+        - Records an explainable R-PROPAGATE decision log row.
+        - Idempotent: does not duplicate review flags or decision logs if already flagged.
+        - Cycle-safe: terminates cleanly if cycles exist.
+        - Atomic: entire operation executes within a transaction (or savepoint).
+        """
+        if not self.cfg.engine.ablation.use_propagation:
+            return []
+
+        if not changed_ids:
+            return []
+
+        raw_recorded_at = recorded_at if recorded_at is not None else self.clock()
+        if raw_recorded_at.tzinfo is None or raw_recorded_at.utcoffset() is None:
+            raise ValueError("Recorded timestamp must be a timezone-aware datetime.")
+        eff_recorded_at = raw_recorded_at.astimezone(UTC)
+
+        if trigger_mode not in ("automatic", "manual"):
+            raise ValueError(
+                f"Unsupported trigger_mode: '{trigger_mode}'. Expected 'automatic' or 'manual'."
+            )
+
+        with self.repo.transaction():
+            # Validate explicit message_id inside transaction before graph reads or mutations
+            if message_id is not None:
+                msg_record = self.repo.get_message(message_id)
+                if msg_record is None:
+                    raise ForeignKeyConstraintError(
+                        f"Explicit message_id {message_id} does not exist in messages table."
+                    )
+
+            edges = self.repo.get_transitive_dependency_edges(changed_ids, direction="downstream")
+            if not edges:
+                return []
+
+            # Find all candidate dependent IDs in the subgraph
+            candidate_ids = {e.src_memory_id for e in edges if e.type == EdgeType.DEPENDS_ON}
+            candidate_memories = self.repo.get_memories_by_ids(sorted(candidate_ids))
+            candidate_map = {m.id: m for m in candidate_memories}
+            memory_statuses = {m.id: m.status for m in candidate_memories}
+
+            propagation_items = compute_propagation(
+                edges=edges,
+                memory_statuses=memory_statuses,
+                changed_ids=changed_ids,
+                cause_text=cause_text,
+            )
+
+            logs: list[DecisionLogEntry] = []
+            for item in propagation_items:
+                # Determine attribution message_id:
+                # - If message_id is explicitly passed and validated, use it
+                # - If omitted, attribute to the changed root memory's message_id
+                if message_id is not None:
+                    eff_msg_id = message_id
+                else:
+                    upstream_root = self.repo.get_memory(item.upstream_id)
+                    if upstream_root is None or upstream_root.message_id is None:
+                        raise ForeignKeyConstraintError(
+                            f"Changed root memory M{item.upstream_id} "
+                            "has no valid message attribution."
+                        )
+                    if self.repo.get_message(upstream_root.message_id) is None:
+                        raise ForeignKeyConstraintError(
+                            f"Changed root memory M{item.upstream_id} references non-existent "
+                            f"message ID {upstream_root.message_id}."
+                        )
+                    eff_msg_id = upstream_root.message_id
+
+                # Event-level idempotency: skip if this exact event is already recorded
+                if self.repo.has_propagation_decision_log(
+                    memory_id=item.memory_id,
+                    upstream_id=item.upstream_id,
+                    message_id=eff_msg_id,
+                    cause=cause_text,
+                    event_id=event_id,
+                    trigger_mode=trigger_mode,
+                ):
+                    continue
+
+                # Update memory review status while preserving multiple causes
+                target_mem = candidate_map.get(item.memory_id)
+                current_reason = target_mem.review_reason if target_mem else None
+                if current_reason:
+                    if item.review_reason not in current_reason:
+                        combined_reason = f"{current_reason}; {item.review_reason}"
+                    else:
+                        combined_reason = current_reason
+                else:
+                    combined_reason = item.review_reason
+
+                self.repo.mark_memory_for_review(item.memory_id, combined_reason)
+                if target_mem is not None:
+                    target_mem.review_reason = combined_reason
+                    target_mem.needs_review = True
+
+                # Record R-PROPAGATE decision log
+                path_str = " -> ".join(f"M{x}" for x in item.path)
+                expl_prefix = "Manual propagation: " if trigger_mode == "manual" else ""
+                explanation = (
+                    f"{expl_prefix}Memory M{item.memory_id} flagged for review: depends on "
+                    f"changed upstream M{item.upstream_id} via path {path_str}, "
+                    f"which was {cause_text}."
+                )
+
+                claim_json = {
+                    "trigger": "propagation",
+                    "trigger_mode": trigger_mode,
+                    "upstream_memory_id": item.upstream_id,
+                    "path": item.path,
+                    "cause": cause_text,
+                }
+                if event_id is not None:
+                    claim_json["event_id"] = event_id
+
+                log_entry = DecisionLogEntry(
+                    id=0,
+                    message_id=eff_msg_id,
+                    claim_json=claim_json,
+                    action=Action.PROPAGATE,
+                    rule_id="R-PROPAGATE",
+                    memory_id=item.memory_id,
+                    affected_memory_ids=[item.memory_id],
+                    scores={"upstream_id": item.upstream_id, "path_length": len(item.path)},
+                    explanation=explanation,
+                    created_at=eff_recorded_at,
+                )
+                saved_log = self.repo.insert_decision_log(log_entry)
+                logs.append(saved_log)
+
+            return logs
 
     # =========================================================================
     # P4.1: Decision Log, Explain, and Invariant Checks

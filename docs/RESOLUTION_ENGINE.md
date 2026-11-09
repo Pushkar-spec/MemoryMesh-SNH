@@ -227,10 +227,34 @@ propagate(graph, changed_ids, cause_text):
     return mutations, flagged                       # flagged = the "blast radius"
 ```
 
+### 5.1 Direction and Semantics
+- **Convention:** If memory B depends on memory A: `B --DEPENDS_ON--> A`.
+  - `src_memory_id = B` (dependent / downstream).
+  - `dst_memory_id = A` (foundation / upstream).
+- **Direct resolution:**
+  - `service.get_dependencies(memory_id)` returns upstream foundations (`src=memory_id`).
+  - `service.get_dependents(memory_id)` returns downstream dependents (`dst=memory_id`).
+- **Transitive resolution:**
+  - `service.get_transitive_dependents(memory_id)` resolves all downstream dependents using cycle-safe BFS, returning `(dependent_memory, path)`.
+  - Cycles, self-referential edges, and diamond duplicates are handled safely without infinite loops or duplicate results.
+
+### 5.2 Propagation Rules
 - Triggered by `R-REPLACE`, `R-DISPUTE`, `R-RETRACT`, and `R-DISPUTE-RESOLVE` (for losers).
 - **Not** triggered by `R-REFINE`, `R-CORROBORATE`, `R-REJECT`, or `R-COEXIST`.
-- Dependents are never auto-deleted or auto-modified; they are only flagged. The flag lowers effective confidence by `review_penalty` until a human calls `acknowledge_review`, or the dependent is itself replaced.
-- Each flagged memory gets its own `decision_log` row with `rule_id = "R-PROPAGATE"`.
+- **What Propagation Does:**
+  - Identifies active or disputed downstream memories reachable via `DEPENDS_ON`.
+  - Sets `needs_review = True` and records an explainable `review_reason` referencing the original changed root memory and cause (transitive dependents do not falsely claim their intermediate predecessors changed).
+  - Traverses each changed root independently; different roots reaching the same dependent produce separate audit records, while diamond paths from the same root are deduplicated.
+  - Generates an audit `DecisionLogEntry` with `rule_id = "R-PROPAGATE"`, `action = Action.PROPAGATE`, recording the original root upstream ID, dependency path, and cause.
+  - Lowers effective confidence dynamically via `review_penalty` during retrieval (without mutating stored base confidence).
+  - Event-level idempotency: A propagation event identity is defined as `(memory_id, upstream_id, message_id, trigger_mode, event_id/cause)`. Repeating the identical propagation event does not duplicate decision log entries. Distinct events, different roots, or different trigger modes (e.g. automatic pipeline vs manual maintenance invocation) generate separate audit records in `decision_log` and preserve multiple active reasons in `review_reason`.
+  - Attribution: automatic propagation (from ingestion or dispute resolution) is marked `trigger_mode = "automatic"`; manual propagation is marked `trigger_mode = "manual"` (even when an audit message is supplied) and attributes to the changed root foundation message if no message is provided.
+  - Runs atomically inside the triggering operation's transaction. All explicit message validations, graph reads, review-state mutations, and decision-log insertions execute inside `self.repo.transaction()`.
+- **What Propagation Deliberately Does NOT Do:**
+  - Does NOT overwrite or mutate factual values (`value_norm`, `value_display`).
+  - Does NOT auto-delete, auto-reject, or auto-retract dependent memories.
+  - Does NOT modify stored base confidence or supporting evidence records.
+  - Does NOT fabricate new claims.
 
 ---
 

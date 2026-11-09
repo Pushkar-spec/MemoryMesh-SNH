@@ -98,6 +98,7 @@ class Action(StrEnum):
     DISPUTE = "DISPUTE"
     RETRACT = "RETRACT"
     SKIP = "SKIP"
+    PROPAGATE = "PROPAGATE"
 
 
 class EdgeType(StrEnum):

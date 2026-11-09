@@ -76,6 +76,7 @@ def test_enum_members_and_values() -> None:
     assert Action.DISPUTE == "DISPUTE"
     assert Action.RETRACT == "RETRACT"
     assert Action.SKIP == "SKIP"
+    assert Action.PROPAGATE == "PROPAGATE"
 
     assert EdgeType.SUPERSEDES == "supersedes"
     assert EdgeType.REFINES == "refines"
