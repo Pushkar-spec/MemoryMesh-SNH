@@ -562,7 +562,15 @@ entities:
 | `number` | `float()` after stripping units; keep unit in display | `SKIP` |
 | `date` | Parse to ISO date | `SKIP` |
 
-**Context key:** sorted `"k=v"` pairs joined by `;`, lowercase. `{}` -> `""` (global scope).
+**Context key:** canonical deterministic JSON serialization with sorted keys and whitespace-normalized keys/values. Context keys and values are **strictly case-sensitive** (`env` and `Env` are distinct keys; `prod` and `Prod` are distinct values). `{}` -> `""` (global scope). Legacy semicolon strings are safely canonicalized via `_canonicalize_context_key()`; duplicate legacy keys or malformed tokens fail safely with `ValueError`.
+
+### 6.1 Context Scopes, Specificity, and Ambiguity Policy
+- **Default Context:** When no context is supplied, claims are scoped to the global context (`context_key = ""`, `context = {}`).
+- **Conflict Isolation:** Claims with differing context keys maintain isolated temporal chains; conflict resolution rules (REPLACE, REJECT, DISPUTE) operate strictly within the same context.
+- **Scope Matching:** A memory context $C_m$ matches query context $C_q$ if $C_m \subseteq C_q$.
+- **Specificity Fallback & Scope Labels:** Retrieval returns memories with the maximum specificity $\text{len}(C_m)$. Matches are labelled `exact` ($C_m = C_q$), `inherited_partial` ($C_m \subset C_q, C_m \neq \emptyset$), or `inherited_global` ($C_m = \emptyset$).
+- **Equally Specific Incomparable Ambiguity Policy:** If multiple equally specific incomparable scopes match on a single-valued attribute, all candidate memories are preserved in `items`, `is_ambiguous = True`, an `ambiguity_reason` is recorded, and neither candidate is silently reported as the definitive value (`get_as_of()` returns `None`). Multi-valued attributes preserve coexistence semantics without ambiguity.
+- **Backfill (`R-BACKFILL`):** Ingesting historical claims prior to later facts fills the preceding gap as `status = HISTORICAL` bounded by the start of the later fact (`valid_to = later.valid_from`), preserving later facts and separating valid time from recorded time. Overlapping historical windows follow corroboration (identical) or dispute/rejection (conflicting) without rewriting or splitting historical intervals.
 
 ---
 

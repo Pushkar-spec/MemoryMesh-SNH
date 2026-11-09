@@ -162,6 +162,20 @@ Multi-valued memories never conflict, so they are never replaced, rejected, or d
 - `recorded_at = recorded_at` parameter; `closed_at` set only if `valid_to` is set.
 - For every `dep_targets` ID: `AddEdge(src="$new", dst=target, type=DEPENDS_ON)` (not for REJECT).
 
+#### Valid/Event Time vs Recorded/Known Time
+MemoryMesh enforces a strict distinction between:
+- **Valid/Event Time (`valid_from`, `valid_to`):** When the fact was true in the real world. Sourced from message extraction or explicit claim timestamps.
+- **Recorded/Known Time (`recorded_at`, `closed_at`):** When the system ingested or learned about the fact. Recorded using injected clock timestamps normalized to UTC.
+
+#### Historical Backfill (`R-BACKFILL`)
+When a claim arrives for a historical interval that precedes an existing memory in the chain (`chain` has memory with `m.valid_from > rc.valid_from`):
+1. **Gate Check:** If the backfill claim has insufficient trust (`s_new < score(later) * reject_ratio`), it is rejected via `R-REJECT`, stored with `status = REJECTED`, and excluded from normal retrieval.
+2. **Gap Filling:** If trust is sufficient, it produces `R-BACKFILL`. The memory is inserted directly with `status = HISTORICAL`.
+3. **Validity Bounds:** Its `valid_to` is capped by `later.valid_from` (or `rc.valid_to` if explicitly specified and smaller), preventing overlap with later facts. `closed_at` is set to `recorded_at`.
+4. **Non-Overwriting:** Existing newer memories (`later`) are untouched and remain `ACTIVE`.
+5. **Timeline Consistency:** Ingesting historical claims chronologically or out-of-order yields identical validity intervals and identical point-in-time retrieval results.
+6. **Design Limitation:** The engine never automatically rewrites previously closed historical windows. If an older claim falls into a closed historical window, it corroborates if identical/refining, or disputes/rejects if conflicting.
+
 ### 4.4 Retract (`R-RETRACT`)
 Claim: "Server A no longer runs service Y." (`polarity = retract`).
 ```text
@@ -261,11 +275,21 @@ propagate(graph, changed_ids, cause_text):
 ## 6. Retrieval Semantics (`retrieval/`)
 
 ### 6.1 Scope matching and specificity
-A memory with context `C_m` **matches** a query with context `C_q` if `C_m ⊆ C_q` (every key/value of the memory appears in the query). Global memories (`{}`) match every query.
-
-Among matching memories for the same `(entity, attribute)`, group by `len(C_m)`. The **highest** specificity group that has at least one memory valid at `valid_at` is the answer (`scope_match = "exact"`); lower-specificity matches are returned as inherited fallback (`scope_match = "inherited_global"`) only if no more specific match exists.
-
-Example: query `{environment: staging}` returns the staging memory (3.11), not the global one (3.12). Query `{}` returns the global one.
+Context scopes allow MemoryMesh to distinguish facts that apply to specific environments, projects, or domains without conflicting:
+- **Canonical Representation:** Contexts are represented as `dict[str, str]` and serialized into deterministic, collision-safe canonical JSON strings (`build_context_key()`) with sorted keys, whitespace-normalized keys/values, and no delimiter ambiguity. Context keys and values are **strictly case-sensitive** (e.g. `env` and `Env` are distinct keys; `prod` and `Prod` are distinct values). Two keys that collide after whitespace normalization (e.g. `env` and ` env `) raise `ValueError`. Legacy string conversion (`_canonicalize_context_key`) safely parses valid semicolon `k=v` pairs, but rejects duplicate legacy keys or malformed tokens with `ValueError` rather than inventing ambiguous mappings.
+- **Default Global Context:** Claims without an explicit context default to `{}` with `context_key = ""`.
+- **Conflict Partitioning:** Conflict detection, resolution (REPLACE, REJECT, DISPUTE), and candidate chains operate strictly within the same `(entity_id, attribute, context_key)`. Different contexts never collide.
+- **Scope Matching ($C_m \subseteq C_q$):** A memory with context $C_m$ matches a query with context $C_q$ if every key/value in $C_m$ matches $C_q$. Global memories (`{}`) match every query.
+- **Specificity & Inherited Fallback:** Among matching memories for `(entity, attribute)`, memories are grouped by specificity $\text{len}(C_m)$. The highest specificity group with memories valid at `valid_at` is selected.
+- **Scope Labels:**
+  - `exact`: memory context exactly matches query context ($C_m = C_q$).
+  - `inherited_partial`: memory context is a non-empty subset of query context ($C_m \subset C_q, C_m \neq \emptyset$).
+  - `inherited_global`: memory context is empty global fallback ($C_m = \emptyset, C_q \neq \emptyset$).
+- **Equally Specific Incomparable Ambiguity Policy:**
+  - When a query matches multiple equally specific candidate memories from incomparable scopes (e.g. `{"project": "A"}` and `{"environment": "staging"}` for query `{"project": "A", "environment": "staging"}`):
+  - *Single-valued attributes:* All matching candidates are preserved in `QueryResult.items` (ordered deterministically by `context_key ASC, valid_from DESC, id ASC`). The result is explicitly flagged with `is_ambiguous = True`, an `ambiguity_reason` is set, and a note is added. Neither candidate is silently reported as the definitive value (`get_as_of()` returns `None`).
+  - *Multi-valued attributes:* Items naturally coexist across matching scopes without ambiguity (`is_ambiguous = False`).
+- **Cross-Context Dependencies:** Dependent claims in a scoped context resolve foundations using scope matching (scoped match first, falling back to global). Cross-context dependencies are tracked via `DEPENDS_ON` edges and propagate upstream changes seamlessly.
 
 ### 6.2 Ranking and flags
 - Items sorted by `effective_conf` descending, then `valid_from` descending.

@@ -115,6 +115,107 @@ def validate_memory_update_field(key: str, val: Any) -> Any:
     return val
 
 
+def _reject_duplicate_object_pairs(pairs: list[tuple[Any, Any]]) -> dict[str, str]:
+    """JSON object pairs hook rejecting duplicate keys, empty/whitespace keys or values,
+
+    and non-string types.
+    """
+    seen: dict[str, str] = {}
+    for k, v in pairs:
+        if not isinstance(k, str) or not isinstance(v, str):
+            raise ValueError(
+                f"Context key '{k}' and value '{v}' must be strings, got "
+                f"{type(k).__name__} and {type(v).__name__}."
+            )
+        k_clean = k.strip()
+        v_clean = v.strip()
+        if not k_clean:
+            raise ValueError("Context key cannot be empty or whitespace.")
+        if not v_clean:
+            raise ValueError(f"Context value for key '{k_clean}' cannot be empty or whitespace.")
+        if k_clean in seen:
+            raise ValueError(
+                f"Duplicate context key in JSON: '{k_clean}'. Duplicate keys are not allowed."
+            )
+        seen[k_clean] = v_clean
+    return seen
+
+
+def _canonicalize_context_key(key: str | None) -> str | None:
+    """Normalize legacy 'k=v;k=v' context key strings to canonical JSON context keys.
+
+    Safely converts valid legacy semicolon-delimited key=value strings into canonical
+    sorted compact JSON context keys for repository queries.
+
+    Limitations and Safety Invariants:
+        - Rejects duplicate keys in JSON objects during parsing via object_pairs_hook.
+        - Rejects malformed JSON strings starting with '{' that fail JSON decoding.
+        - Rejects empty legacy tokens rather than discarding them.
+        - Rejects non-JSON strings without valid 'key=value' structure (e.g. 'malformed').
+        - Rejects tokens with ambiguous multiple '=' delimiters.
+        - Rejects empty keys, empty values, and duplicate keys.
+    """
+    if key is None or not key:
+        return key
+
+    if key.startswith("{"):
+        try:
+            parsed = json.loads(key, object_pairs_hook=_reject_duplicate_object_pairs)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Malformed canonical JSON context key: '{key}'") from exc
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError(f"Malformed canonical JSON context key: '{key}'") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError(
+                f"Malformed canonical JSON context key: '{key}'. "
+                "Must be a dict of string keys/values."
+            )
+        return json.dumps(parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+    if "=" not in key:
+        raise ValueError(
+            f"Invalid context key '{key}': "
+            "must be valid canonical JSON or valid legacy 'key=value' format."
+        )
+
+    raw_tokens = key.split(";")
+    cleaned: dict[str, str] = {}
+    for raw_token in raw_tokens:
+        token = raw_token.strip()
+        if not token:
+            raise ValueError(
+                f"Empty token in legacy context key '{key}'. Malformed delimiters are not allowed."
+            )
+        if "=" not in token:
+            raise ValueError(
+                f"Malformed legacy context key token '{token}' in '{key}': missing '=' delimiter."
+            )
+        if token.count("=") > 1:
+            raise ValueError(
+                f"Ambiguous legacy context key token '{token}' in '{key}': multiple '=' delimiters."
+            )
+        k, v = token.split("=", 1)
+        k_clean = k.strip()
+        v_clean = v.strip()
+        if not k_clean or not v_clean:
+            raise ValueError(
+                f"Malformed legacy context key token '{token}' in '{key}': "
+                "key and value must be non-empty."
+            )
+        if k_clean in cleaned:
+            raise ValueError(
+                f"Duplicate legacy context key '{k_clean}' in '{key}'. "
+                "Lossless canonical conversion is impossible."
+            )
+        cleaned[k_clean] = v_clean
+
+    if not cleaned:
+        return ""
+    return json.dumps(cleaned, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
 class Repository:
     """Encapsulates all SQLite database interactions with typed domain models."""
 
@@ -332,7 +433,7 @@ class Repository:
         LEFT JOIN entities e ON m.entity_id = e.id
         WHERE m.entity_id = ? AND m.attribute = ? AND m.context_key = ?
         """
-        params: list[Any] = [entity_id, attribute, context_key]
+        params: list[Any] = [entity_id, attribute, _canonicalize_context_key(context_key) or ""]
         if not include_rejected:
             sql += " AND m.status != 'rejected'"
 
@@ -361,7 +462,7 @@ class Repository:
 
         if context_key is not None:
             clauses.append("m.context_key = ?")
-            params.append(context_key)
+            params.append(_canonicalize_context_key(context_key))
 
         if known_at is not None:
             known_str = format_datetime_utc(known_at)
@@ -804,7 +905,7 @@ class Repository:
             params.append(attribute)
         if context_key is not None:
             clauses.append("ma.context_key = ?")
-            params.append(context_key)
+            params.append(_canonicalize_context_key(context_key))
 
         sql = f"""
         SELECT

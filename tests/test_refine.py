@@ -164,7 +164,6 @@ class TestRefineEngineRules:
     ) -> None:
         cfg = load_engine_config()
         t1 = datetime(2026, 3, 1, 10, 0, tzinfo=UTC)
-        t_older = datetime(2026, 2, 1, 10, 0, tzinfo=UTC)
 
         existing_mem = Memory(
             id=10,
@@ -193,12 +192,12 @@ class TestRefineEngineRules:
             value_norm="3.12.4",
             value_display="3.12.4",
             context_key="",
-            valid_from=t_older,
+            valid_from=t1,
             source=sample_source,
             message_id=2,
         )
 
-        with pytest.raises(ConflictResolutionError, match="Cannot replace: claim is not newer"):
+        with pytest.raises(ConflictResolutionError, match="Cannot refine: claim is not newer"):
             resolve(
                 rc=rc,
                 chain=[existing_mem],

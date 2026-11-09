@@ -266,7 +266,7 @@ def test_mutation_union_types() -> None:
 
 
 def test_add_edge_literal_new_and_int() -> None:
-    """Verify AddEdge src and dst accept int or literal '$new', rejecting others."""
+    """Verify AddEdge src and dst accept int or literal endpoints, rejecting others."""
     # Valid cases
     e1 = AddEdge(src="$new", dst=2, type=EdgeType.SUPERSEDES)
     assert e1.src == "$new"
@@ -279,6 +279,12 @@ def test_add_edge_literal_new_and_int() -> None:
     e3 = AddEdge(src=1, dst=2, type=EdgeType.REFINES)
     assert e3.src == 1
     assert e3.dst == 2
+
+    e4 = AddEdge(src="$continuation", dst=2, type=EdgeType.SUPERSEDES)
+    assert e4.src == "$continuation"
+
+    e5 = AddEdge(src="$refined", dst=2, type=EdgeType.REFINES)
+    assert e5.src == "$refined"
 
     # Invalid literal
     with pytest.raises(ValidationError):

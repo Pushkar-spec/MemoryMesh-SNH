@@ -20,6 +20,7 @@ from memorymesh.models import (
     Cardinality,
     Claim,
     EdgeType,
+    Evidence,
     InsertMemory,
     Memory,
     MemoryStatus,
@@ -286,17 +287,24 @@ def test_r_replace_not_newer_claim_rejected(
         message_id=102,
     )
 
-    # An older conflicting claim cannot replace existing newer memory
-    with pytest.raises(ConflictResolutionError, match="not newer"):
-        resolve(
-            rc=rc_older,
-            chain=[existing_mem],
-            schema=sample_attribute,
-            cfg=cfg,
-            classify=lambda _rc, _m: Relation.CONFLICTS,
-            dep_targets=[],
-            recorded_at=datetime(2026, 6, 1, 12, 5, tzinfo=UTC),
-        )
+    # An older conflicting claim prior to existing memory produces R-BACKFILL
+    decision = resolve(
+        rc=rc_older,
+        chain=[existing_mem],
+        schema=sample_attribute,
+        cfg=cfg,
+        classify=lambda _rc, _m: Relation.CONFLICTS,
+        dep_targets=[],
+        recorded_at=datetime(2026, 6, 1, 12, 5, tzinfo=UTC),
+    )
+    assert decision.action == Action.BACKFILL
+    assert decision.rule_id == "R-BACKFILL"
+    assert len(decision.mutations) == 1
+    mut = decision.mutations[0]
+    assert isinstance(mut, InsertMemory)
+    assert mut.memory.status == MemoryStatus.HISTORICAL
+    assert mut.memory.valid_from == t_older_claim
+    assert mut.memory.valid_to == t_existing
 
 
 def test_same_time_validity_boundary_does_not_replace(
@@ -521,3 +529,187 @@ def test_multi_cardinality_conflicting_claim_blocks_replace(
     assert decision.action == Action.COEXIST
     assert decision.rule_id == "R-COEXIST"
     assert decision.action != Action.REPLACE
+
+
+def test_r_historical_refine_partial_three_way_split(
+    sample_attribute: AttributeDef, sample_source: Source
+) -> None:
+    """Historical refinement with finite valid_to produces 3 segments (before, refined, after)."""
+    cfg = load_engine_config()
+    t_start = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    t_refine_start = datetime(2026, 3, 1, 0, 0, tzinfo=UTC)
+    t_refine_end = datetime(2026, 4, 1, 0, 0, tzinfo=UTC)
+    t_end = datetime(2026, 6, 1, 0, 0, tzinfo=UTC)
+    t_recorded = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+
+    hist_mem = Memory(
+        id=42,
+        entity_id=1,
+        attribute="python_version",
+        value_norm="3.10",
+        value_display="3.10",
+        context_key="",
+        valid_from=t_start,
+        valid_to=t_end,
+        recorded_at=t_start,
+        closed_at=t_end,
+        status=MemoryStatus.HISTORICAL,
+        confidence=0.95,
+        message_id=1,
+        source_id="sysadmin_priya",
+        evidence=[
+            Evidence(
+                id=1,
+                memory_id=42,
+                source_id="sysadmin_priya",
+                message_id=1,
+                strength=0.95,
+                observed_at=t_start,
+                span="3.10",
+            )
+        ],
+    )
+
+    rc_refine = ResolvedClaim(
+        claim=Claim(
+            subject="Server A",
+            attribute="python_version",
+            value="3.10.4",
+            valid_from=t_refine_start,
+            valid_to=t_refine_end,
+            extract_confidence=0.98,
+        ),
+        entity_id=1,
+        attribute="python_version",
+        value_norm="3.10.4",
+        value_display="3.10.4",
+        context_key="",
+        valid_from=t_refine_start,
+        valid_to=t_refine_end,
+        source=sample_source,
+        message_id=2,
+    )
+
+    decision = resolve(
+        rc=rc_refine,
+        chain=[hist_mem],
+        schema=sample_attribute,
+        cfg=cfg,
+        classify=lambda _rc, _m: Relation.REFINES,
+        dep_targets=[99],
+        recorded_at=t_recorded,
+    )
+
+    assert decision.action == Action.REFINE
+    assert decision.rule_id == "R-REFINE"
+    assert decision.affected_memory_ids == [42]
+    assert "splits original window into before" in decision.explanation
+
+    # Mutations:
+    # 0: InsertMemory (refined_mem)
+    # 1: AddEdge (REFINES -> 42)
+    # 2: AddEdge (DEPENDS_ON -> 99)
+    # 3: UpdateMemory (42, valid_to=t_refine_start)
+    # 4: InsertMemory (continuation_mem)
+    # 5: AddEdge (SUPERSEDES -> 42)
+    assert len(decision.mutations) == 6
+
+    m_refined_ins = decision.mutations[0]
+    assert isinstance(m_refined_ins, InsertMemory)
+    assert m_refined_ins.memory.value_norm == "3.10.4"
+    assert m_refined_ins.memory.valid_from == t_refine_start
+    assert m_refined_ins.memory.valid_to == t_refine_end
+    assert m_refined_ins.memory.status == MemoryStatus.HISTORICAL
+
+    edge_refines = decision.mutations[1]
+    assert isinstance(edge_refines, AddEdge)
+    assert edge_refines.src == "$new"
+    assert edge_refines.dst == 42
+    assert edge_refines.type == EdgeType.REFINES
+
+    edge_dep = decision.mutations[2]
+    assert isinstance(edge_dep, AddEdge)
+    assert edge_dep.src == "$new"
+    assert edge_dep.dst == 99
+    assert edge_dep.type == EdgeType.DEPENDS_ON
+
+    m_update = decision.mutations[3]
+    assert isinstance(m_update, UpdateMemory)
+    assert m_update.memory_id == 42
+    assert m_update.fields["valid_to"] == t_refine_start
+    assert m_update.fields["closed_at"] == t_recorded
+
+    m_cont_ins = decision.mutations[4]
+    assert isinstance(m_cont_ins, InsertMemory)
+    assert m_cont_ins.memory.value_norm == "3.10"
+    assert m_cont_ins.memory.valid_from == t_refine_end
+    assert m_cont_ins.memory.valid_to == t_end
+    assert m_cont_ins.memory.status == MemoryStatus.HISTORICAL
+
+    edge_cont = decision.mutations[5]
+    assert isinstance(edge_cont, AddEdge)
+    assert edge_cont.src == "$continuation"
+    assert edge_cont.dst == 42
+    assert edge_cont.type == EdgeType.SUPERSEDES
+
+
+def test_r_historical_refine_rejects_target_without_evidence(
+    sample_attribute: AttributeDef, sample_source: Source
+) -> None:
+    """Historical refinement rejects when target historical memory has no evidence records."""
+    cfg = load_engine_config()
+    t_start = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    t_refine_start = datetime(2026, 3, 1, 0, 0, tzinfo=UTC)
+    t_refine_end = datetime(2026, 4, 1, 0, 0, tzinfo=UTC)
+    t_end = datetime(2026, 6, 1, 0, 0, tzinfo=UTC)
+    t_recorded = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+
+    # Historical memory without any evidence records
+    hist_mem_no_ev = Memory(
+        id=99,
+        entity_id=1,
+        attribute="python_version",
+        value_norm="3.10",
+        value_display="3.10",
+        context_key="",
+        valid_from=t_start,
+        valid_to=t_end,
+        recorded_at=t_start,
+        closed_at=t_end,
+        status=MemoryStatus.HISTORICAL,
+        confidence=0.85,
+        message_id=1,
+        source_id="sysadmin_priya",
+        evidence=[],
+    )
+
+    rc_refine = ResolvedClaim(
+        claim=Claim(
+            subject="Server A",
+            attribute="python_version",
+            value="3.10.4",
+            valid_from=t_refine_start,
+            valid_to=t_refine_end,
+            extract_confidence=0.98,
+        ),
+        entity_id=1,
+        attribute="python_version",
+        value_norm="3.10.4",
+        value_display="3.10.4",
+        context_key="",
+        valid_from=t_refine_start,
+        valid_to=t_refine_end,
+        source=sample_source,
+        message_id=2,
+    )
+
+    with pytest.raises(ConflictResolutionError, match="target has no evidence records"):
+        resolve(
+            rc=rc_refine,
+            chain=[hist_mem_no_ev],
+            schema=sample_attribute,
+            cfg=cfg,
+            classify=lambda _rc, _m: Relation.REFINES,
+            dep_targets=[],
+            recorded_at=t_recorded,
+        )

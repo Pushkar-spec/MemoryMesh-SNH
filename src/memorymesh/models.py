@@ -290,11 +290,14 @@ class NewEvidence(MeshBaseModel):
     span: str = ""
 
 
+EdgeEndpoint = int | Literal["$new", "$new:0", "$new:1", "$refined", "$continuation"]
+
+
 class InsertMemory(MeshBaseModel):
     """Mutation to insert a new memory along with initial evidence."""
 
     memory: NewMemory
-    evidence: NewEvidence
+    evidence: NewEvidence | list[NewEvidence]
 
 
 class UpdateMemory(MeshBaseModel):
@@ -307,15 +310,15 @@ class UpdateMemory(MeshBaseModel):
 class AddEvidence(MeshBaseModel):
     """Mutation to attach corroborating evidence to a memory."""
 
-    memory_id: int
+    memory_id: EdgeEndpoint
     evidence: NewEvidence
 
 
 class AddEdge(MeshBaseModel):
-    """Mutation to add an edge. $new indicates the newly inserted memory."""
+    """Mutation to add an edge. $new or symbolic placeholders indicate newly inserted memories."""
 
-    src: int | Literal["$new"]
-    dst: int | Literal["$new"]
+    src: EdgeEndpoint
+    dst: EdgeEndpoint
     type: EdgeType
     reason: str = ""
 
@@ -323,7 +326,7 @@ class AddEdge(MeshBaseModel):
 class RecomputeConfidence(MeshBaseModel):
     """Mutation instructing the confidence score to be recalculated."""
 
-    memory_id: int | Literal["$new"]
+    memory_id: EdgeEndpoint
 
 
 Mutation = InsertMemory | UpdateMemory | AddEvidence | AddEdge | RecomputeConfidence
@@ -364,7 +367,7 @@ class MemoryView(MeshBaseModel):
     effective_confidence: float  # confidence * decay * review penalty
     is_stale: bool  # effective_confidence below stale floor
     source_names: list[str] = Field(default_factory=list)
-    scope_match: Literal["exact", "inherited_global"]
+    scope_match: Literal["exact", "inherited_partial", "inherited_global"]
 
 
 class ImpactItem(MeshBaseModel):
@@ -396,6 +399,8 @@ class QueryResult(MeshBaseModel):
     decisions: list[DecisionLogEntry] = Field(default_factory=list)
     edges: list[Edge] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+    is_ambiguous: bool = False
+    ambiguity_reason: str | None = None
 
 
 class FinalAnswer(MeshBaseModel):

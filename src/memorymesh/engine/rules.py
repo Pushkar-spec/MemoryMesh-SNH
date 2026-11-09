@@ -147,13 +147,21 @@ def resolve(
         if hist:
             # Conflict with history only (new claim reaches back into a closed historical window)
             rel = classify(rc, hist[0])
-            if rel in (Relation.IDENTICAL, Relation.REFINES):
+            if rel == Relation.IDENTICAL:
                 return _produce_r_corroborate_or_dup(
                     rc=rc,
                     target=hist[0],
                     s_new=s_new,
                     cfg=cfg,
                     recorded_at=recorded_at,
+                )
+            if rel == Relation.REFINES:
+                return _produce_r_historical_refine(
+                    rc=rc,
+                    target=hist[0],
+                    dep_targets=dep_targets,
+                    recorded_at=recorded_at,
+                    s_new=s_new,
                 )
             if rel == Relation.CONFLICTS:
                 hist_score = _compute_memory_score(hist[0], rc.valid_from, schema, cfg)
@@ -186,9 +194,28 @@ def resolve(
                 recorded_at=recorded_at,
                 s_new=s_new,
             )
-        raise ConflictResolutionError(
-            "Cannot replace: claim is not newer than existing memory (prior to later fact). "
-            "Backfilling into an earlier gap is deferred to Phase 6 (R-BACKFILL)."
+
+        # R-BACKFILL gate: older fact filling an earlier gap prior to later memory.
+        # Evaluate later memory at its inception time (later.valid_from) to obtain its
+        # established baseline score without backwards-in-time decay anomalies.
+        later_score = _compute_memory_score(later, later.valid_from, schema, cfg)
+        if s_new < later_score * cfg.thresholds.reject_ratio:
+            return _produce_r_reject(
+                rc=rc,
+                live=[later],
+                recorded_at=recorded_at,
+                s_new=s_new,
+                old_score=later_score,
+                reject_ratio=cfg.thresholds.reject_ratio,
+            )
+
+        return _produce_r_backfill(
+            rc=rc,
+            later=later,
+            dep_targets=dep_targets,
+            recorded_at=recorded_at,
+            s_new=s_new,
+            later_score=later_score,
         )
 
     # 4. Multi-valued attribute resolution (R-COEXIST, R-CORROBORATE)
@@ -439,6 +466,68 @@ def _produce_r_insert(
     )
 
 
+def _produce_r_backfill(
+    rc: ResolvedClaim,
+    later: Memory,
+    dep_targets: list[int],
+    recorded_at: datetime,
+    s_new: float = 1.0,
+    later_score: float = 1.0,
+) -> Decision:
+    """Build an R-BACKFILL Decision for an older fact filling an earlier gap."""
+    valid_to = later.valid_from
+    if rc.valid_to is not None:
+        valid_to = min(rc.valid_to, later.valid_from)
+
+    new_mem = NewMemory(
+        entity_id=rc.entity_id,
+        attribute=rc.attribute,
+        value_norm=rc.value_norm,
+        value_display=rc.value_display,
+        context=rc.claim.context,
+        context_key=rc.context_key,
+        valid_from=rc.valid_from,
+        valid_to=valid_to,
+        closed_at=recorded_at,
+        status=MemoryStatus.HISTORICAL,
+        confidence=s_new,
+        raw_text=rc.claim.span or "",
+        message_id=rc.message_id,
+        source_id=rc.source.id,
+    )
+    new_evidence = NewEvidence(
+        source_id=rc.source.id,
+        message_id=rc.message_id,
+        strength=s_new,
+        observed_at=recorded_at,
+        span=rc.claim.span or "",
+    )
+
+    mutations: list[Mutation] = [InsertMemory(memory=new_mem, evidence=new_evidence)]
+
+    for target_id in dep_targets:
+        mutations.append(
+            AddEdge(
+                src="$new",
+                dst=target_id,
+                type=EdgeType.DEPENDS_ON,
+                reason="claim dependency",
+            )
+        )
+
+    return Decision(
+        action=Action.BACKFILL,
+        rule_id="R-BACKFILL",
+        explanation=(
+            f"Backfilled historical claim for {rc.claim.subject}.{rc.attribute} filling gap "
+            f"prior to memory M{later.id} (valid_to={format_datetime_utc(valid_to)})."
+        ),
+        scores={"new_score": s_new, "later_score": later_score},
+        mutations=mutations,
+        affected_memory_ids=[later.id],
+    )
+
+
 def _produce_r_replace(
     rc: ResolvedClaim,
     live: list[Memory],
@@ -607,6 +696,29 @@ def _produce_r_dispute(
     is_revert: bool = False,
 ) -> Decision:
     """Build an R-DISPUTE Decision placing both new and existing memories in dispute."""
+    dispute_valid_to = rc.valid_to
+
+    # Historical interval clamping applies strictly when disputed target memories are HISTORICAL
+    is_historical_dispute = bool(live and all(m.status == MemoryStatus.HISTORICAL for m in live))
+    if is_historical_dispute:
+        hist_bound = min((m.valid_to for m in live if m.valid_to is not None), default=None)
+        if hist_bound is not None:
+            if dispute_valid_to is None or dispute_valid_to > hist_bound:
+                dispute_valid_to = hist_bound
+
+    if dispute_valid_to is not None and dispute_valid_to <= rc.valid_from:
+        raise InvalidValidityWindowError(
+            f"Disputed memory valid_to ({dispute_valid_to}) must be greater than "
+            f"valid_from ({rc.valid_from})."
+        )
+
+    # Invariant INV-CLOSED-AT-REQUIRED: valid_to is not None implies closed_at is not None.
+    # Distinguish valid/event time from recorded/known time:
+    # - For finite validity intervals (e.g. historical disputes), the memory is known to be
+    #   closed at recorded_at (closed_at = recorded_at).
+    # - For open-ended active disputes (valid_to is None), closed_at remains None.
+    closed_at = recorded_at if dispute_valid_to is not None else None
+
     new_mem = NewMemory(
         entity_id=rc.entity_id,
         attribute=rc.attribute,
@@ -615,8 +727,8 @@ def _produce_r_dispute(
         context=rc.claim.context,
         context_key=rc.context_key,
         valid_from=rc.valid_from,
-        valid_to=rc.valid_to,
-        closed_at=recorded_at if rc.valid_to is not None else None,
+        valid_to=dispute_valid_to,
+        closed_at=closed_at,
         status=MemoryStatus.DISPUTED,
         confidence=s_new,
         raw_text=rc.claim.span or "",
@@ -829,4 +941,174 @@ def _produce_r_refine(
         scores={"new_score": s_new, "old_score": 1.0},
         mutations=mutations,
         affected_memory_ids=affected_ids,
+    )
+
+
+def _produce_r_historical_refine(
+    rc: ResolvedClaim,
+    target: Memory,
+    dep_targets: list[int],
+    recorded_at: datetime,
+    s_new: float = 1.0,
+) -> Decision:
+    """Build an R-REFINE Decision for a claim refining a closed historical memory.
+
+    Adjusts the coarse historical memory's validity interval to [target.valid_from, rc.valid_from)
+    and inserts the refined claim as a HISTORICAL memory over [rc.valid_from, refined_valid_to).
+    If rc.valid_to is earlier than target.valid_to, inserts an after/continuation segment over
+    [rc.valid_to, target.valid_to) representing the coarse value for the remainder of the original
+    historical window. This prevents gaps and overlapping validity intervals on single-valued
+    attributes while preserving full provenance and temporal invariants.
+    """
+    if target.valid_to is None:
+        raise ConflictResolutionError("Target historical memory has no valid_to.")
+
+    if rc.valid_from <= target.valid_from:
+        raise ConflictResolutionError(
+            f"Historical refinement valid_from ({rc.valid_from}) must be strictly greater than "
+            f"target memory valid_from ({target.valid_from})."
+        )
+
+    refined_valid_to = (
+        min(rc.valid_to, target.valid_to) if rc.valid_to is not None else target.valid_to
+    )
+    if refined_valid_to <= rc.valid_from:
+        raise InvalidValidityWindowError(
+            f"Refined memory valid_to ({refined_valid_to}) must be greater than "
+            f"valid_from ({rc.valid_from})."
+        )
+
+    # 1. Refined memory segment: [rc.valid_from, refined_valid_to)
+    refined_mem = NewMemory(
+        entity_id=rc.entity_id,
+        attribute=rc.attribute,
+        value_norm=rc.value_norm,
+        value_display=rc.value_display,
+        context=rc.claim.context,
+        context_key=rc.context_key,
+        valid_from=rc.valid_from,
+        valid_to=refined_valid_to,
+        closed_at=recorded_at,
+        status=MemoryStatus.HISTORICAL,
+        confidence=s_new,
+        raw_text=rc.claim.span or "",
+        message_id=rc.message_id,
+        source_id=rc.source.id,
+    )
+    refined_evidence = NewEvidence(
+        source_id=rc.source.id,
+        message_id=rc.message_id,
+        strength=s_new,
+        observed_at=recorded_at,
+        span=rc.claim.span or "",
+    )
+
+    mutations: list[Mutation] = [
+        InsertMemory(memory=refined_mem, evidence=refined_evidence),
+        AddEdge(
+            src="$new",
+            dst=target.id,
+            type=EdgeType.REFINES,
+            reason=(
+                f"refines historical memory M{target.id} ('{target.value_norm}') "
+                f"with '{rc.value_norm}' from {format_datetime_utc(rc.valid_from)}"
+            ),
+        ),
+    ]
+    for target_id in dep_targets:
+        mutations.append(
+            AddEdge(
+                src="$new",
+                dst=target_id,
+                type=EdgeType.DEPENDS_ON,
+                reason="claim dependency",
+            )
+        )
+
+    # 2. Before segment: update target to [target.valid_from, rc.valid_from)
+    mutations.append(
+        UpdateMemory(
+            memory_id=target.id,
+            fields={
+                "valid_to": rc.valid_from,
+                "closed_at": recorded_at,
+            },
+        )
+    )
+
+    # 3. After (continuation) segment: if refinement ends before target.valid_to,
+    # preserve coarse value and all original evidence records for [rc.valid_to, target.valid_to)
+    if rc.valid_to is not None and rc.valid_to < target.valid_to:
+        continuation_mem = NewMemory(
+            entity_id=target.entity_id,
+            attribute=target.attribute,
+            value_norm=target.value_norm,
+            value_display=target.value_display,
+            context=target.context,
+            context_key=target.context_key,
+            valid_from=rc.valid_to,
+            valid_to=target.valid_to,
+            closed_at=recorded_at,
+            status=MemoryStatus.HISTORICAL,
+            confidence=target.confidence,
+            raw_text=target.raw_text,
+            message_id=target.message_id,
+            source_id=target.source_id,
+        )
+        if not target.evidence:
+            raise ConflictResolutionError(
+                f"Cannot partially refine historical memory M{target.id}: target has no evidence "
+                f"records to substantiate continuation interval "
+                f"[{format_datetime_utc(rc.valid_to)}, {format_datetime_utc(target.valid_to)})."
+            )
+
+        continuation_evidences = [
+            NewEvidence(
+                source_id=ev.source_id,
+                message_id=ev.message_id,
+                strength=ev.strength,
+                observed_at=ev.observed_at,
+                span=ev.span,
+            )
+            for ev in target.evidence
+        ]
+        mutations.append(InsertMemory(memory=continuation_mem, evidence=continuation_evidences))
+        mutations.append(
+            AddEdge(
+                src="$continuation",
+                dst=target.id,
+                type=EdgeType.SUPERSEDES,
+                reason=(
+                    f"continuation of historical M{target.id} ('{target.value_norm}') "
+                    f"following refinement window [{format_datetime_utc(rc.valid_from)}, "
+                    f"{format_datetime_utc(rc.valid_to)})"
+                ),
+            )
+        )
+
+    if rc.valid_to is not None and rc.valid_to < target.valid_to:
+        explanation = (
+            f"Historical claim '{rc.value_norm}' refines historical memory M{target.id} "
+            f"('{target.value_norm}') on attribute '{rc.attribute}' for sub-interval "
+            f"[{format_datetime_utc(rc.valid_from)}, {format_datetime_utc(rc.valid_to)}); "
+            f"splits original window into before [{format_datetime_utc(target.valid_from)}, "
+            f"{format_datetime_utc(rc.valid_from)}), refined "
+            f"[{format_datetime_utc(rc.valid_from)}, {format_datetime_utc(rc.valid_to)}), "
+            f"and continuation "
+            f"[{format_datetime_utc(rc.valid_to)}, {format_datetime_utc(target.valid_to)})."
+        )
+    else:
+        explanation = (
+            f"Historical claim '{rc.value_norm}' refines existing historical memory M{target.id} "
+            f"('{target.value_norm}') on attribute '{rc.attribute}'; closes coarser observation at "
+            f"{format_datetime_utc(rc.valid_from)}."
+        )
+
+    return Decision(
+        action=Action.REFINE,
+        rule_id="R-REFINE",
+        explanation=explanation,
+        scores={"new_score": s_new, "old_score": target.confidence},
+        mutations=mutations,
+        affected_memory_ids=[target.id],
     )

@@ -82,6 +82,7 @@ from memorymesh.models import (
 from memorymesh.repository import Repository
 from memorymesh.retrieval.retrieve import (
     build_context_key,
+    normalize_context,
     retrieve_current,
     retrieve_valid_memories,
 )
@@ -92,6 +93,38 @@ def _make_classifier(schema: AttributeDef) -> Callable[[ResolvedClaim, Memory], 
         return classify_claim_memory(new_claim, existing_mem, schema)
 
     return classify
+
+
+def _resolve_memory_placeholder(
+    ref: int | str,
+    inserted_ids: list[int],
+    current_id: int | None,
+) -> int:
+    """Resolve an integer memory ID or symbolic placeholder to a persisted memory ID."""
+    if isinstance(ref, int):
+        return ref
+    if ref == "$new":
+        if current_id is not None:
+            return current_id
+        if inserted_ids:
+            return inserted_ids[-1]
+        raise ValueError("Cannot resolve '$new': no memory inserted yet.")
+    if ref in ("$new:0", "$refined"):
+        if len(inserted_ids) >= 1:
+            return inserted_ids[0]
+        raise ValueError(f"Cannot resolve '{ref}': first memory not inserted yet.")
+    if ref in ("$new:1", "$continuation"):
+        if len(inserted_ids) >= 2:
+            return inserted_ids[1]
+        raise ValueError(f"Cannot resolve '{ref}': second memory not inserted yet.")
+    if ref.startswith("$new:"):
+        idx = int(ref.split(":", 1)[1])
+        if 0 <= idx < len(inserted_ids):
+            return inserted_ids[idx]
+        raise ValueError(
+            f"Cannot resolve '{ref}': index {idx} out of range ({len(inserted_ids)} inserted)."
+        )
+    raise ValueError(f"Unknown memory placeholder: {ref}")
 
 
 class MemoryService:
@@ -308,8 +341,26 @@ class MemoryService:
                             "Not found in database or catalog."
                         )
 
-                context_key = build_context_key(claim.context)
+                if not self.cfg.engine.ablation.use_context:
+                    clean_context: dict[str, str] = {}
+                    context_key = ""
+                else:
+                    clean_context = normalize_context(claim.context) if claim.context else {}
+                    context_key = build_context_key(clean_context)
+                claim.context = clean_context
                 valid_from = claim.valid_from or message.event_time
+                if valid_from.tzinfo is None or valid_from.utcoffset() is None:
+                    raise ValueError(
+                        "Claim valid_from or message event_time must be timezone-aware."
+                    )
+                valid_from = valid_from.astimezone(UTC)
+
+                if claim.valid_to is not None:
+                    if claim.valid_to.tzinfo is None or claim.valid_to.utcoffset() is None:
+                        raise ValueError("Claim valid_to must be timezone-aware.")
+                    valid_to = claim.valid_to.astimezone(UTC)
+                else:
+                    valid_to = None
 
                 try:
                     value_norm = normalize_value(
@@ -343,7 +394,7 @@ class MemoryService:
                     value_display=claim.value,
                     context_key=context_key,
                     valid_from=valid_from,
-                    valid_to=claim.valid_to,
+                    valid_to=valid_to,
                     source=source,
                     message_id=message_id,
                 )
@@ -371,6 +422,7 @@ class MemoryService:
                             int(target_ent["id"]),
                             dep.attribute,
                             now=valid_from,
+                            context=claim.context if self.cfg.engine.ablation.use_context else None,
                         )
                         if target_mem:
                             dep_targets.append(target_mem.id)
@@ -393,28 +445,40 @@ class MemoryService:
                 )
 
                 # Apply mutations atomically in order
-                new_mem_id: int | None = None
+                inserted_mem_ids: list[int] = []
+                current_new_id: int | None = None
                 for mutation in decision.mutations:
                     if isinstance(mutation, InsertMemory):
-                        new_mem_id = self.repo.insert_memory(
+                        current_new_id = self.repo.insert_memory(
                             mutation.memory, recorded_at=eff_recorded_at
                         )
-                        self.repo.insert_evidence(new_mem_id, mutation.evidence)
+                        inserted_mem_ids.append(current_new_id)
+                        ev_list = (
+                            mutation.evidence
+                            if isinstance(mutation.evidence, list)
+                            else [mutation.evidence]
+                        )
+                        for ev in ev_list:
+                            self.repo.insert_evidence(current_new_id, ev)
                     elif isinstance(mutation, UpdateMemory):
                         self.repo.update_memory(mutation.memory_id, mutation.fields)
                     elif isinstance(mutation, AddEvidence):
-                        target_id = (
-                            new_mem_id if mutation.memory_id == "$new" else mutation.memory_id
+                        target_id = _resolve_memory_placeholder(
+                            mutation.memory_id, inserted_mem_ids, current_new_id
                         )
                         self.repo.insert_evidence(target_id, mutation.evidence)
                     elif isinstance(mutation, RecomputeConfidence):
-                        target_id = (
-                            new_mem_id if mutation.memory_id == "$new" else mutation.memory_id
+                        target_id = _resolve_memory_placeholder(
+                            mutation.memory_id, inserted_mem_ids, current_new_id
                         )
                         self.recompute_confidence(target_id)
                     elif isinstance(mutation, AddEdge):
-                        src_id = new_mem_id if mutation.src == "$new" else mutation.src
-                        dst_id = new_mem_id if mutation.dst == "$new" else mutation.dst
+                        src_id = _resolve_memory_placeholder(
+                            mutation.src, inserted_mem_ids, current_new_id
+                        )
+                        dst_id = _resolve_memory_placeholder(
+                            mutation.dst, inserted_mem_ids, current_new_id
+                        )
                         self.repo.insert_edge(
                             src_memory_id=src_id,
                             dst_memory_id=dst_id,
@@ -424,8 +488,8 @@ class MemoryService:
                         )
 
                 primary_mem_id = (
-                    new_mem_id
-                    if new_mem_id is not None
+                    inserted_mem_ids[0]
+                    if inserted_mem_ids
                     else (decision.affected_memory_ids[0] if decision.affected_memory_ids else None)
                 )
 
@@ -447,11 +511,15 @@ class MemoryService:
                 # P5.1: Propagate changes downstream if an existing memory was affected
                 if decision.rule_id in ("R-REPLACE", "R-DISPUTE", "R-RETRACT"):
                     changed_ids = [
-                        m_id for m_id in decision.affected_memory_ids if m_id != new_mem_id
+                        m_id for m_id in decision.affected_memory_ids if m_id != primary_mem_id
                     ]
                     if changed_ids:
                         if decision.rule_id == "R-REPLACE":
-                            cause = f"superseded by M{new_mem_id}" if new_mem_id else "superseded"
+                            cause = (
+                                f"superseded by M{primary_mem_id}"
+                                if primary_mem_id
+                                else "superseded"
+                            )
                         elif decision.rule_id == "R-DISPUTE":
                             cause = "placed in dispute"
                         else:
@@ -599,7 +667,7 @@ class MemoryService:
         self,
         m: Memory,
         ref_time: datetime,
-        scope_match: Literal["exact", "inherited_global"] = "exact",
+        scope_match: Literal["exact", "inherited_partial", "inherited_global"] = "exact",
     ) -> MemoryView:
         attr_schema = self.repo.get_attribute_schema(m.attribute)
         half_life = attr_schema.half_life_days if attr_schema else None
@@ -654,24 +722,47 @@ class MemoryService:
             return QueryResult(plan=plan, items=[], notes=[f"Entity '{entity}' not found."])
 
         entity_id = int(ent["id"])
+        if not self.cfg.engine.ablation.use_context:
+            effective_context = None
+        else:
+            effective_context = normalize_context(context) if context else None
+
         memories = retrieve_valid_memories(
             repo=self.repo,
             entity_id=entity_id,
             attribute=attribute,
             valid_at=req_valid_at,
             known_at=req_known_at,
-            context=context,
+            context=effective_context,
             include_rejected=False,
         )
 
-        items = [self._build_memory_view(m, req_valid_at) for m in memories]
+        q_ctx = effective_context or {}
+        items: list[MemoryView] = []
+        for m in memories:
+            m_ctx = m.context or {}
+            if m_ctx == q_ctx:
+                scope_label: Literal["exact", "inherited_partial", "inherited_global"] = "exact"
+            elif not m_ctx:
+                scope_label = "inherited_global"
+            else:
+                scope_label = "inherited_partial"
+            items.append(self._build_memory_view(m, req_valid_at, scope_match=scope_label))
 
-        ctx_key = build_context_key(context)
+        ctx_key = build_context_key(effective_context)
         disputed_pairs = self.repo.find_disputed_pairs(
             entity_id=entity_id,
             attribute=attribute,
             context_key=ctx_key,
         )
+        if not disputed_pairs and any(
+            item.scope_match in ("inherited_global", "inherited_partial") for item in items
+        ):
+            disputed_pairs = self.repo.find_disputed_pairs(
+                entity_id=entity_id,
+                attribute=attribute,
+                context_key="",
+            )
         dispute_views = [
             DisputeView(
                 a=self._build_memory_view(pair[0], req_valid_at),
@@ -682,7 +773,33 @@ class MemoryService:
         ]
 
         notes = [] if items else ["No memory valid at the requested time."]
-        return QueryResult(plan=plan, items=items, disputes=dispute_views, notes=notes)
+
+        # Check for ambiguity among equally specific incomparable scopes
+        is_ambiguous = False
+        ambiguity_reason = None
+        attr_schema = self.repo.get_attribute_schema(attribute)
+        is_single = attr_schema is None or attr_schema.cardinality == Cardinality.SINGLE
+
+        if is_single and len(items) > 1:
+            distinct_contexts = {build_context_key(m.context) for m in memories}
+            if len(distinct_contexts) > 1:
+                is_ambiguous = True
+                sorted_scopes = sorted(distinct_contexts)
+                ambiguity_reason = (
+                    f"Ambiguous context match: found {len(items)} equally specific incomparable "
+                    f"context scopes ({', '.join(sorted_scopes)}) for single-valued "
+                    f"attribute '{attribute}'."
+                )
+                notes.append(ambiguity_reason)
+
+        return QueryResult(
+            plan=plan,
+            items=items,
+            disputes=dispute_views,
+            notes=notes,
+            is_ambiguous=is_ambiguous,
+            ambiguity_reason=ambiguity_reason,
+        )
 
     def disputes(self, entity: str | None = None) -> list[DisputeView]:
         """Retrieve all active disputes, optionally filtered by entity name."""
@@ -845,14 +962,17 @@ class MemoryService:
         known_at: datetime | None = None,
     ) -> Memory | None:
         """Convenience method returning the single Memory valid as of valid_at, or None."""
+        eff_now = self.clock()
         res = self.current(
             entity=entity,
             attribute=attribute,
             context=context,
             valid_at=valid_at,
             known_at=known_at,
-            now=valid_at,
+            now=eff_now,
         )
+        if res.is_ambiguous:
+            return None
         return res.items[0].memory if res.items else None
 
     # =========================================================================
@@ -1290,6 +1410,8 @@ class MemoryService:
                 f"{view.effective_confidence:.4f} (stale={view.is_stale})."
             ),
         ]
+        if mem.context_key:
+            notes.append(f"Context scope: '{mem.context_key}'.")
         if mem.needs_review:
             notes.append(f"Review required: {mem.review_reason or 'Flagged for human review'}.")
         if mem.evidence:
