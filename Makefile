@@ -1,5 +1,5 @@
 SHELL = cmd.exe
-.PHONY: help setup test lint check api web types web-check eval smoke reset seed demo
+.PHONY: help setup test lint check api web types web-check eval smoke reset seed demo hero
 
 help:
 	@echo MemoryMesh Development Commands
@@ -10,6 +10,8 @@ help:
 	@echo   make lint      - Run ruff check and format verification
 	@echo   make check     - Run backend stage checks (lint + test)
 	@echo   make demo      - [P1.3] Run structured temporal memory CLI demonstration
+	@echo   make hero      - [P5.3] Run G1 structured hero scenario demonstration
+	@echo   make seed      - [P5.3] Seed and run hero scenario demonstration
 	@echo   make smoke     - [P0.4] Run LLM provider smoke test
 	@echo   make web       - [P0.4] Start Vite React dev server
 	@echo   make web-check - [P0.4] Run frontend verification (eslint, tsc, vite build)
@@ -19,7 +21,6 @@ help:
 	@echo   make api       - [P9] Start FastAPI backend server
 	@echo   make eval      - [P8] Run evaluation pipeline against baseline
 	@echo   make reset     - [P0.3] Reset database and recreate schema
-	@echo   make seed      - [P5] Seed demo scenario
 
 setup:
 	python -m pip install -e ".[dev]"
@@ -69,7 +70,9 @@ reset:
 	@echo ERROR: 'make reset' is pending P0.3 (Database schema and db.py).
 	@exit 1
 
+hero:
+	python scripts/demo_hero_scenario.py
+
 seed:
-	@echo ERROR: 'make seed' is pending P5 (Hero scenario seeding script).
-	@exit 1
+	python scripts/demo_hero_scenario.py
 
