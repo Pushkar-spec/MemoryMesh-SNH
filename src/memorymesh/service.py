@@ -10,7 +10,7 @@ import sqlite3
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from memorymesh.config import AppConfig, load_app_config
 from memorymesh.db import DEFAULT_DB_PATH, init_db
@@ -38,6 +38,8 @@ from memorymesh.models import (
     Cardinality,
     Claim,
     DecisionLogEntry,
+    DisputeView,
+    EdgeType,
     Evidence,
     IngestMessage,
     IngestReport,
@@ -427,9 +429,145 @@ class MemoryService:
                 decisions=decisions_log,
             )
 
+    def resolve_dispute(
+        self,
+        winner_memory_id: int,
+        *,
+        recorded_at: datetime | None = None,
+        explanation: str | None = None,
+    ) -> DecisionLogEntry:
+        """Explicitly resolve an active dispute in favor of winner_memory_id.
+
+        Governed by docs/RESOLUTION_ENGINE.md Section 4.5 (R-DISPUTE-RESOLVE):
+        - Winner memory status becomes ACTIVE.
+        - For each other member in the dispute group (connected by contradicts edges):
+          - If loser.valid_from < winner.valid_from (older):
+            loser status becomes HISTORICAL, valid_to = winner.valid_from,
+            closed_at = eff_recorded_at, and SUPERSEDES edge is created.
+          - Otherwise (loser.valid_from >= winner.valid_from):
+            loser status becomes REJECTED, closed_at = eff_recorded_at.
+        - Atomically records a DecisionLogEntry with rule_id="R-DISPUTE-RESOLVE".
+        """
+        raw_recorded_at = recorded_at if recorded_at is not None else self.clock()
+        if raw_recorded_at.tzinfo is None or raw_recorded_at.utcoffset() is None:
+            raise ValueError("Recorded timestamp must be a timezone-aware datetime.")
+        eff_recorded_at = raw_recorded_at.astimezone(UTC)
+
+        with self.repo.transaction():
+            winner = self.repo.get_memory(winner_memory_id)
+            if winner is None:
+                raise MemoryNotFoundError(f"Memory with ID {winner_memory_id} does not exist.")
+            if winner.status != MemoryStatus.DISPUTED:
+                raise ValueError(
+                    f"Memory {winner_memory_id} has status '{winner.status}', expected 'disputed'."
+                )
+
+            group = self.repo.get_dispute_group(winner_memory_id)
+            if len(group) < 2:
+                raise ValueError(
+                    f"Memory {winner_memory_id} does not belong to an active "
+                    "multi-memory dispute group."
+                )
+
+            losers = [m for m in group if m.id != winner_memory_id]
+
+            self.repo.update_memory(winner.id, {"status": MemoryStatus.ACTIVE})
+
+            loser_summaries: list[str] = []
+            for loser in losers:
+                if loser.valid_from < winner.valid_from:
+                    self.repo.update_memory(
+                        loser.id,
+                        {
+                            "status": MemoryStatus.HISTORICAL,
+                            "valid_to": winner.valid_from,
+                            "closed_at": eff_recorded_at,
+                        },
+                    )
+                    self.repo.insert_edge(
+                        src_memory_id=winner.id,
+                        dst_memory_id=loser.id,
+                        edge_type=EdgeType.SUPERSEDES,
+                        reason="dispute resolution: winner supersedes older claim",
+                        created_at=eff_recorded_at,
+                    )
+                    loser_summaries.append(
+                        f"M{loser.id} (valid_from={loser.valid_from.isoformat()}) "
+                        "transitioned to HISTORICAL"
+                    )
+                else:
+                    self.repo.update_memory(
+                        loser.id,
+                        {
+                            "status": MemoryStatus.REJECTED,
+                            "closed_at": eff_recorded_at,
+                        },
+                    )
+                    loser_summaries.append(
+                        f"M{loser.id} (valid_from={loser.valid_from.isoformat()}) "
+                        "transitioned to REJECTED"
+                    )
+
+            expl = explanation or (
+                f"Dispute resolved in favor of memory M{winner.id} "
+                f"('{winner.value_display}', confidence={winner.confidence:.2f}). "
+                + "; ".join(loser_summaries)
+            )
+            claim_summary = {
+                "entity_id": winner.entity_id,
+                "attribute": winner.attribute,
+                "context_key": winner.context_key,
+                "winner_memory_id": winner.id,
+                "winner_value": winner.value_display,
+                "loser_memory_ids": [loser.id for loser in losers],
+            }
+            log_entry = DecisionLogEntry(
+                id=0,
+                message_id=winner.message_id,
+                claim_json=claim_summary,
+                action=Action.DISPUTE,
+                rule_id="R-DISPUTE-RESOLVE",
+                memory_id=winner.id,
+                affected_memory_ids=[winner.id] + [loser.id for loser in losers],
+                scores={"winner_confidence": winner.confidence},
+                explanation=expl,
+                created_at=eff_recorded_at,
+            )
+            saved_log = self.repo.insert_decision_log(log_entry)
+            return saved_log
+
     # =========================================================================
     # Read: Retrieval
     # =========================================================================
+
+    def _build_memory_view(
+        self,
+        m: Memory,
+        ref_time: datetime,
+        scope_match: Literal["exact", "inherited_global"] = "exact",
+    ) -> MemoryView:
+        attr_schema = self.repo.get_attribute_schema(m.attribute)
+        half_life = attr_schema.half_life_days if attr_schema else None
+        decay = calculate_decay(m.valid_from, ref_time, half_life)
+        eff_conf = calculate_effective_confidence(
+            m.confidence,
+            decay_factor=decay,
+            needs_review=m.needs_review,
+            review_penalty=self.cfg.engine.thresholds.review_penalty,
+        )
+        stale = is_stale(eff_conf, stale_floor=self.cfg.engine.thresholds.stale_floor)
+        source_names = list(
+            dict.fromkeys(
+                [e.source_id for e in m.evidence] + ([m.source_id] if m.source_id else [])
+            )
+        )
+        return MemoryView(
+            memory=m,
+            effective_confidence=eff_conf,
+            is_stale=stale,
+            source_names=source_names,
+            scope_match=scope_match,
+        )
 
     def current(
         self,
@@ -471,34 +609,50 @@ class MemoryService:
             include_rejected=False,
         )
 
-        items = []
-        for m in memories:
-            attr_schema = self.repo.get_attribute_schema(m.attribute)
-            half_life = attr_schema.half_life_days if attr_schema else None
-            decay = calculate_decay(m.valid_from, req_valid_at, half_life)
-            eff_conf = calculate_effective_confidence(
-                m.confidence,
-                decay_factor=decay,
-                needs_review=m.needs_review,
-                review_penalty=self.cfg.engine.thresholds.review_penalty,
+        items = [self._build_memory_view(m, req_valid_at) for m in memories]
+
+        ctx_key = build_context_key(context)
+        disputed_pairs = self.repo.find_disputed_pairs(
+            entity_id=entity_id,
+            attribute=attribute,
+            context_key=ctx_key,
+        )
+        dispute_views = [
+            DisputeView(
+                a=self._build_memory_view(pair[0], req_valid_at),
+                b=self._build_memory_view(pair[1], req_valid_at),
+                edge_reason=pair[2],
             )
-            stale = is_stale(eff_conf, stale_floor=self.cfg.engine.thresholds.stale_floor)
-            source_names = list(
-                dict.fromkeys(
-                    [e.source_id for e in m.evidence] + ([m.source_id] if m.source_id else [])
-                )
-            )
-            items.append(
-                MemoryView(
-                    memory=m,
-                    effective_confidence=eff_conf,
-                    is_stale=stale,
-                    source_names=source_names,
-                    scope_match="exact",
-                )
-            )
+            for pair in disputed_pairs
+        ]
+
         notes = [] if items else ["No memory valid at the requested time."]
-        return QueryResult(plan=plan, items=items, notes=notes)
+        return QueryResult(plan=plan, items=items, disputes=dispute_views, notes=notes)
+
+    def disputes(self, entity: str | None = None) -> list[DisputeView]:
+        """Retrieve all active disputes, optionally filtered by entity name."""
+        entity_id: int | None = None
+        if entity is not None:
+            ent = self.repo.get_entity_by_name(entity)
+            if ent is None:
+                ent = self.repo.get_entity_by_alias(normalize_entity_name(entity))
+            if ent is None:
+                return []
+            entity_id = int(ent["id"])
+
+        ref_time = self.clock()
+        if ref_time.tzinfo is None or ref_time.utcoffset() is None:
+            raise ValueError("Clock must return a timezone-aware datetime.")
+
+        pairs = self.repo.find_disputed_pairs(entity_id=entity_id)
+        return [
+            DisputeView(
+                a=self._build_memory_view(pair[0], ref_time),
+                b=self._build_memory_view(pair[1], ref_time),
+                edge_reason=pair[2],
+            )
+            for pair in pairs
+        ]
 
     # =========================================================================
     # Evidence & Confidence Operations

@@ -594,6 +594,113 @@ class Repository:
         cursor = self.conn.execute(sql, id_list)
         return {str(row[0]) for row in cursor.fetchall()}
 
+    def get_dispute_group(self, memory_id: int) -> list[Memory]:
+        """Retrieve the complete connected component of disputed memories for memory_id.
+
+        Traverses edges of type 'contradicts' starting from memory_id, collecting all
+        memories that share the same entity_id, attribute, and context_key and have
+        status == MemoryStatus.DISPUTED.
+        """
+        root = self.get_memory(memory_id)
+        if root is None or root.status != MemoryStatus.DISPUTED:
+            return []
+
+        visited: set[int] = {root.id}
+        queue: list[Memory] = [root]
+        group: list[Memory] = [root]
+
+        while queue:
+            curr = queue.pop(0)
+            sql = """
+            SELECT src_memory_id, dst_memory_id
+            FROM edges
+            WHERE (src_memory_id = ? OR dst_memory_id = ?)
+              AND type = 'contradicts'
+            """
+            cursor = self.conn.execute(sql, (curr.id, curr.id))
+            for row in cursor.fetchall():
+                nbr_id = int(
+                    row["dst_memory_id"]
+                    if row["src_memory_id"] == curr.id
+                    else row["src_memory_id"]
+                )
+                if nbr_id not in visited:
+                    visited.add(nbr_id)
+                    nbr = self.get_memory(nbr_id)
+                    if (
+                        nbr is not None
+                        and nbr.status == MemoryStatus.DISPUTED
+                        and nbr.entity_id == root.entity_id
+                        and nbr.attribute == root.attribute
+                        and nbr.context_key == root.context_key
+                    ):
+                        queue.append(nbr)
+                        group.append(nbr)
+
+        return group
+
+    def find_disputed_pairs(
+        self,
+        entity_id: int | None = None,
+        attribute: str | None = None,
+        context_key: str | None = None,
+    ) -> list[tuple[Memory, Memory, str]]:
+        """Retrieve unique pairs of memories connected by active contradicts edges.
+
+        Both memories in each returned pair must currently have status == 'disputed'
+        and identical entity_id, attribute, and context_key.
+        """
+        clauses = [
+            "e.type = 'contradicts'",
+            "ma.status = 'disputed'",
+            "mb.status = 'disputed'",
+            "ma.entity_id = mb.entity_id",
+            "ma.attribute = mb.attribute",
+            "ma.context_key = mb.context_key",
+        ]
+        params: list[Any] = []
+
+        if entity_id is not None:
+            clauses.append("ma.entity_id = ?")
+            params.append(entity_id)
+        if attribute is not None:
+            clauses.append("ma.attribute = ?")
+            params.append(attribute)
+        if context_key is not None:
+            clauses.append("ma.context_key = ?")
+            params.append(context_key)
+
+        sql = f"""
+        SELECT
+            e.id AS edge_id,
+            e.src_memory_id,
+            e.dst_memory_id,
+            e.reason AS edge_reason
+        FROM edges e
+        JOIN memories ma ON e.src_memory_id = ma.id
+        JOIN memories mb ON e.dst_memory_id = mb.id
+        WHERE {" AND ".join(clauses)}
+        ORDER BY e.id ASC
+        """
+        cursor = self.conn.execute(sql, params)
+        rows = cursor.fetchall()
+
+        seen_pairs: set[tuple[int, int]] = set()
+        pairs: list[tuple[Memory, Memory, str]] = []
+        for row in rows:
+            id_a = int(row["src_memory_id"])
+            id_b = int(row["dst_memory_id"])
+            pair_key = (min(id_a, id_b), max(id_a, id_b))
+            if pair_key in seen_pairs:
+                continue
+            seen_pairs.add(pair_key)
+            mem_a = self.get_memory(pair_key[0])
+            mem_b = self.get_memory(pair_key[1])
+            if mem_a is not None and mem_b is not None:
+                pairs.append((mem_a, mem_b, str(row["edge_reason"] or "")))
+
+        return pairs
+
     # =========================================================================
     # Seeding and Infrastructure Operations
     # =========================================================================
