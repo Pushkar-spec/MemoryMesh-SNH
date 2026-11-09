@@ -695,6 +695,11 @@ class Repository:
         sql = "UPDATE memories SET needs_review = 1, review_reason = ? WHERE id = ?"
         self.conn.execute(sql, (review_reason, memory_id))
 
+    def acknowledge_memory_review(self, memory_id: int) -> None:
+        """Clear review flag and review reason for an acknowledged memory."""
+        sql = "UPDATE memories SET needs_review = 0, review_reason = '' WHERE id = ?"
+        self.conn.execute(sql, (memory_id,))
+
     def get_superseded_ancestor_values(self, memory_ids: list[int] | set[int]) -> set[str]:
         """Retrieve historical values superseded by memory_ids through the supersession chain.
 
@@ -1110,6 +1115,34 @@ class Repository:
         sql = f"SELECT 1 FROM decision_log WHERE {where_clause} LIMIT 1"
         row = self.conn.execute(sql, params).fetchone()
         return row is not None
+
+    def get_latest_acknowledgement_log(self, memory_id: int) -> DecisionLogEntry | None:
+        """Retrieve the most recent R-ACKNOWLEDGE decision log entry for a memory."""
+        sql = """
+        SELECT * FROM decision_log
+        WHERE rule_id = 'R-ACKNOWLEDGE' AND memory_id = ?
+        ORDER BY id DESC LIMIT 1
+        """
+        row = self.conn.execute(sql, (memory_id,)).fetchone()
+        return self._row_to_decision_log(row) if row else None
+
+    def get_current_acknowledgement_log(self, memory_id: int) -> DecisionLogEntry | None:
+        """Retrieve the active R-ACKNOWLEDGE decision log entry for a memory.
+
+        Returns the log entry only if the most recent review-lifecycle decision
+        (between R-PROPAGATE and R-ACKNOWLEDGE) is R-ACKNOWLEDGE.
+        If the memory was subsequently re-flagged by R-PROPAGATE, returns None
+        so that an old acknowledgement is never mistaken for the current state.
+        """
+        sql = """
+        SELECT * FROM decision_log
+        WHERE memory_id = ? AND rule_id IN ('R-PROPAGATE', 'R-ACKNOWLEDGE')
+        ORDER BY id DESC LIMIT 1
+        """
+        row = self.conn.execute(sql, (memory_id,)).fetchone()
+        if row and row["rule_id"] == "R-ACKNOWLEDGE":
+            return self._row_to_decision_log(row)
+        return None
 
     def _row_to_decision_log(self, r: sqlite3.Row) -> DecisionLogEntry:
         """Convert a database row into a DecisionLogEntry domain object."""

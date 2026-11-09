@@ -291,7 +291,8 @@ Example: query `{environment: staging}` returns the staging memory (3.11), not t
   6. `INV-IDEMPOTENT-INGEST`: Passive duplicate-key consistency across committed messages (behavioral idempotency—that duplicate ingestion creates no additional memories and returns duplicate=True—is verified dynamically by the test suite).
   7. `INV-FOREIGN-KEY-INTEGRITY`: Edges, decision log references, and evidence records point to existing memory records.
   8. `INV-SOURCE-ATTRIBUTE-INTEGRITY`: References to entities, attribute definitions, and sources exist in the database catalogs.
-- **Impact:** `propagate`-style traversal without writing, returning `ImpactItem` with the dependency path.
+- **Impact Analysis (`service.impact(memory_id)`):** Strictly read-only downstream dependency traversal returning `list[ImpactItem]`. Discovers direct and transitive dependents, primary and alternate acyclic paths, memory statuses, review flags, and propagation audit traces safely in the presence of graph cycles without mutating database state.
+- **Review Acknowledgement (`service.acknowledge_review(memory_id)`):** Human review acknowledgement operation executed atomically inside a transaction. Clears `needs_review = False` and `review_reason = ''` on the target memory, preserves factual values, validity windows, confidence, and edges, and records an auditable `R-ACKNOWLEDGE` entry in `decision_log` with `Action.ACKNOWLEDGE`. Repeated calls on an already-acknowledged memory are idempotent no-ops. Memory not marked for review raises `ValueError`. Missing memory raises `MemoryNotFoundError`.
 
 ---
 
@@ -375,6 +376,7 @@ Assumed extractor confidence: `0.95` for direct statements, `0.50` for hedged on
 | `R-DISPUTE-RESOLVE` | (manual) | Human picks a winner |
 | `R-DISPUTE-AUTO` | (stretch) | Automatic dispute resolution |
 | `R-PROPAGATE` | (side effect) | Dependent flagged `needs_review` |
+| `R-ACKNOWLEDGE` | ACKNOWLEDGE | Human acknowledges review for flagged memory |
 
 ---
 

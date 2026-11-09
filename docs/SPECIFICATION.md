@@ -54,6 +54,7 @@ class Action(StrEnum):
     RETRACT = "RETRACT"
     SKIP = "SKIP"
     PROPAGATE = "PROPAGATE"
+    ACKNOWLEDGE = "ACKNOWLEDGE"
 
 class EdgeType(StrEnum):
     SUPERSEDES = "supersedes"
@@ -298,7 +299,8 @@ class MemoryService:
     def ingest_claims(self, message: IngestMessage, claims: list[Claim],
                       *, recorded_at: datetime | None = None) -> IngestReport:                         # bypasses LLM (structured mode)
     def resolve_dispute(self, winner_memory_id: int) -> DecisionLogEntry:           # human action
-    def acknowledge_review(self, memory_id: int) -> None:                           # clear needs_review
+    def acknowledge_review(self, memory_id: int, *, recorded_at: datetime | None = None,
+                           reviewed_by: str | None = None, explanation: str | None = None) -> DecisionLogEntry # clear needs_review
     def get_dependencies(self, memory_id: int) -> list[Memory]                      # direct upstream foundations
     def get_dependents(self, memory_id: int) -> list[Memory]                        # direct downstream dependents
     def get_transitive_dependents(self, memory_id: int) -> list[tuple[Memory, list[int]]] # reachable dependents + paths

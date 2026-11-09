@@ -14,6 +14,7 @@ Where:
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Mapping, Sequence, Set
 from dataclasses import dataclass
 from typing import Protocol
@@ -199,3 +200,168 @@ def compute_propagation(
                 queue.append((dep, dep_path))
 
     return flagged_items
+
+
+def compute_impact_paths(
+    edges: Sequence[EdgeLike],
+    root_id: int,
+    *,
+    max_paths_per_dependent: int = 10,
+    max_search_budget: int = 2000,
+) -> list[tuple[int, list[int], list[list[int]], bool]]:
+    """Compute reachable downstream dependent memories and simple paths from root.
+
+    Guarantees complete reachability: all downstream dependents are discovered
+    regardless of chain length, eliminating silent depth truncation.
+    Phase 1 performs O(V + E) BFS with parent tracking to discover all reachable
+    dependents and reconstruct exact shortest paths.
+
+    Safeguards against exponential path explosion:
+    - Traversal is cycle-safe (never revisits a node on the same path).
+    - Caps total retained paths at max_paths_per_dependent per dependent
+      (including the primary shortest path).
+    - Strictly bounds candidate path expansions via max_search_budget. One budget unit
+      represents examining one candidate outgoing edge from a path prefix. High-outdegree
+      nodes cannot generate an unbounded number of queued paths in a single iteration.
+    - Accurately reports whether path exploration was bounded via paths_truncated.
+
+    Args:
+        edges: Set of DEPENDS_ON edges to traverse.
+        root_id: Upstream root memory ID to analyze.
+        max_paths_per_dependent: Maximum total number of retained paths per dependent,
+            including the primary shortest path. Must be a positive integer.
+        max_search_budget: Maximum candidate path expansions during alternate-path search.
+            One unit of max_search_budget represents examining one candidate outgoing edge
+            from an explored path prefix. Enforces a strict resource bound on queue growth
+            and exploration steps. Must be a positive integer.
+
+    Returns:
+        List of (dependent_id, primary_path, all_paths, paths_truncated) tuples
+        in deterministic discovery order:
+        - dependent_id: the affected dependent memory ID (root_id is excluded).
+        - primary_path: the shortest path from root_id to dependent_id.
+        - all_paths: sorted list of simple (acyclic) paths from root_id to dependent_id.
+        - paths_truncated: True if alternate path exploration hit a budget or count limit.
+
+    Raises:
+        ValueError: If max_paths_per_dependent or max_search_budget is not a positive integer.
+    """
+    if (
+        isinstance(max_paths_per_dependent, bool)
+        or not isinstance(max_paths_per_dependent, int)
+        or max_paths_per_dependent <= 0
+    ):
+        raise ValueError(
+            f"max_paths_per_dependent must be a positive integer, got {max_paths_per_dependent!r}."
+        )
+
+    if (
+        isinstance(max_search_budget, bool)
+        or not isinstance(max_search_budget, int)
+        or max_search_budget <= 0
+    ):
+        raise ValueError(
+            f"max_search_budget must be a positive integer, got {max_search_budget!r}."
+        )
+
+    dependents_map, _ = build_dependency_graph(edges)
+
+    # Phase 1: Guaranteed complete reachability & shortest path discovery via O(V + E) BFS
+    discovery_order: list[int] = []
+    parent: dict[int, int] = {}
+    visited_nodes: set[int] = {root_id}
+    bfs_queue: deque[int] = deque([root_id])
+
+    while bfs_queue:
+        curr = bfs_queue.popleft()
+        for dep in dependents_map.get(curr, []):
+            if dep == root_id or dep in visited_nodes:
+                continue
+            visited_nodes.add(dep)
+            parent[dep] = curr
+            discovery_order.append(dep)
+            bfs_queue.append(dep)
+
+    if not discovery_order:
+        return []
+
+    # Reconstruct shortest paths from parent map
+    shortest_paths: dict[int, list[int]] = {}
+    for dep in discovery_order:
+        path = [dep]
+        curr = dep
+        while curr != root_id:
+            curr = parent[curr]
+            path.append(curr)
+        path.reverse()
+        shortest_paths[dep] = path
+
+    # Phase 2: Controlled enumeration of alternate simple paths
+    paths_by_dep: dict[int, list[list[int]]] = {
+        dep: [shortest_paths[dep]] for dep in discovery_order
+    }
+    truncated_by_dep: dict[int, bool] = {dep: False for dep in discovery_order}
+
+    path_queue: deque[tuple[int, list[int]]] = deque([(root_id, [root_id])])
+    budget_used = 0
+    budget_exhausted = False
+    exhaustion_node: int | None = None
+
+    while path_queue:
+        curr, path = path_queue.popleft()
+        direct_deps = dependents_map.get(curr, [])
+
+        for dep in direct_deps:
+            if budget_used >= max_search_budget:
+                budget_exhausted = True
+                exhaustion_node = curr
+                break
+
+            budget_used += 1
+
+            if dep == root_id or dep in path:
+                continue  # cycle-safe
+
+            new_path = path + [dep]
+            if dep in paths_by_dep:
+                if new_path not in paths_by_dep[dep]:
+                    if len(paths_by_dep[dep]) < max_paths_per_dependent:
+                        paths_by_dep[dep].append(new_path)
+                    else:
+                        truncated_by_dep[dep] = True
+
+            path_queue.append((dep, new_path))
+
+        if budget_exhausted:
+            break
+
+    if budget_exhausted:
+        pending_nodes: list[int] = []
+        if exhaustion_node is not None:
+            pending_nodes.append(exhaustion_node)
+        pending_nodes.extend(curr_node for curr_node, _ in path_queue)
+        pending_nodes = list(dict.fromkeys(pending_nodes))
+
+        for curr_node in pending_nodes:
+            if curr_node in truncated_by_dep:
+                truncated_by_dep[curr_node] = True
+
+        sub_queue: deque[int] = deque(pending_nodes)
+        sub_visited = set(pending_nodes)
+        while sub_queue:
+            sn = sub_queue.popleft()
+            for s_dep in dependents_map.get(sn, []):
+                if s_dep in truncated_by_dep:
+                    truncated_by_dep[s_dep] = True
+                if s_dep not in sub_visited:
+                    sub_visited.add(s_dep)
+                    sub_queue.append(s_dep)
+
+    result: list[tuple[int, list[int], list[list[int]], bool]] = []
+    for dep_id in discovery_order:
+        all_p = paths_by_dep[dep_id]
+        primary = shortest_paths[dep_id]
+        sorted_all = sorted(all_p, key=lambda p: (len(p), p))
+        result.append((dep_id, primary, sorted_all, truncated_by_dep[dep_id]))
+
+    return result

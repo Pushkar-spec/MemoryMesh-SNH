@@ -99,6 +99,7 @@ class Action(StrEnum):
     RETRACT = "RETRACT"
     SKIP = "SKIP"
     PROPAGATE = "PROPAGATE"
+    ACKNOWLEDGE = "ACKNOWLEDGE"
 
 
 class EdgeType(StrEnum):
@@ -372,6 +373,8 @@ class ImpactItem(MeshBaseModel):
     memory: MemoryView
     path: list[int] = Field(default_factory=list)  # memory IDs from changed memory to dependent
     reason: str
+    all_paths: list[list[int]] = Field(default_factory=list)
+    paths_truncated: bool = False
 
 
 class DisputeView(MeshBaseModel):

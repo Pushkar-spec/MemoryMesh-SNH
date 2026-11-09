@@ -36,6 +36,7 @@ from memorymesh.engine.invariants import (
 )
 from memorymesh.engine.normalize import normalize_value
 from memorymesh.engine.propagate import (
+    compute_impact_paths,
     compute_propagation,
     resolve_direct_dependencies,
     resolve_direct_dependents,
@@ -59,6 +60,7 @@ from memorymesh.models import (
     DisputeView,
     EdgeType,
     Evidence,
+    ImpactItem,
     IngestMessage,
     IngestReport,
     InsertMemory,
@@ -1053,6 +1055,168 @@ class MemoryService:
                 logs.append(saved_log)
 
             return logs
+
+    def impact(self, memory_id: int) -> list[ImpactItem]:
+        """Inspect the downstream blast radius and impact of a memory.
+
+        Traverses DEPENDS_ON edges downstream from memory_id without mutating database state.
+        Identifies direct and transitive dependents, dependency paths, memory status,
+        review flags, and relevant propagation decision logs.
+
+        Args:
+            memory_id: Root memory ID to analyze.
+
+        Returns:
+            List of ImpactItem objects for all reachable downstream memories.
+
+        Raises:
+            MemoryNotFoundError: If memory_id does not exist.
+        """
+        root_mem = self.repo.get_memory(memory_id)
+        if root_mem is None:
+            raise MemoryNotFoundError(f"Memory with id={memory_id} not found.")
+
+        edges = self.repo.get_transitive_dependency_edges([memory_id], direction="downstream")
+        if not edges:
+            return []
+
+        dep_tuples = compute_impact_paths(edges, memory_id)
+        if not dep_tuples:
+            return []
+
+        dep_ids = [t[0] for t in dep_tuples]
+        dep_memories = self.repo.get_memories_by_ids(dep_ids, include_evidence=True)
+        dep_map = {m.id: m for m in dep_memories}
+
+        ref_time = self.clock()
+        if ref_time.tzinfo is None or ref_time.utcoffset() is None:
+            raise ValueError("Clock must return a timezone-aware datetime.")
+        ref_time = ref_time.astimezone(UTC)
+
+        items: list[ImpactItem] = []
+        for dep_id, primary_path, all_paths, is_truncated in dep_tuples:
+            mem = dep_map.get(dep_id)
+            if mem is None:
+                continue
+
+            view = self._build_memory_view(mem, ref_time=ref_time)
+
+            is_direct = len(primary_path) == 2
+            kind = "Direct dependent" if is_direct else "Transitive dependent"
+            path_str = " -> ".join(f"M{x}" for x in primary_path)
+
+            alt_paths = [p for p in all_paths if p != primary_path]
+            if alt_paths:
+                alt_str = (
+                    " (also reachable via: "
+                    + ", ".join(" -> ".join(f"M{x}" for x in p) for p in alt_paths)
+                    + ")"
+                )
+            else:
+                alt_str = ""
+
+            status_str = f"status={mem.status.value}, needs_review={mem.needs_review}"
+            reason_parts = [f"{kind} of M{memory_id} via {path_str}{alt_str}", status_str]
+
+            if is_truncated:
+                reason_parts.append("alternate paths truncated by safety limit")
+
+            # Check decision log for existing R-PROPAGATE decisions related to this root
+            prop_logs = self.repo.get_decision_logs_for_memory(dep_id)
+            relevant_props = [
+                d
+                for d in prop_logs
+                if d.rule_id == "R-PROPAGATE"
+                and d.claim_json.get("upstream_memory_id") == memory_id
+            ]
+            if relevant_props:
+                latest_prop = relevant_props[-1]
+                cause = latest_prop.claim_json.get("cause", "")
+                reason_parts.append(f"propagated via {latest_prop.rule_id} (cause: '{cause}')")
+            elif mem.needs_review and mem.review_reason:
+                reason_parts.append(f"review_reason: '{mem.review_reason}'")
+
+            reason = "; ".join(reason_parts)
+            items.append(
+                ImpactItem(
+                    memory=view,
+                    path=primary_path,
+                    reason=reason,
+                    all_paths=all_paths,
+                    paths_truncated=is_truncated,
+                )
+            )
+
+        return items
+
+    def acknowledge_review(
+        self,
+        memory_id: int,
+        *,
+        recorded_at: datetime | None = None,
+        reviewed_by: str | None = None,
+        explanation: str | None = None,
+    ) -> DecisionLogEntry:
+        """Acknowledge that a memory flagged for review has been reviewed by a human.
+
+        Governed by P5.2:
+        - Clears needs_review (set to False) and clears review_reason on the memory.
+        - Preserves factual value, confidence, evidence, validity interval, and status.
+        - Records an auditable R-ACKNOWLEDGE decision log entry with Action.ACKNOWLEDGE.
+        - Idempotent: repeating acknowledgement on an already acknowledged memory returns
+          the existing decision log entry without duplicate writes.
+        - Atomic: entire operation executes within a transaction.
+        - Raises ValueError if the memory was never marked for review.
+        - Raises MemoryNotFoundError if the memory does not exist.
+        """
+        raw_recorded_at = recorded_at if recorded_at is not None else self.clock()
+        if raw_recorded_at.tzinfo is None or raw_recorded_at.utcoffset() is None:
+            raise ValueError("Recorded timestamp must be a timezone-aware datetime.")
+        eff_recorded_at = raw_recorded_at.astimezone(UTC)
+
+        with self.repo.transaction():
+            mem = self.repo.get_memory(memory_id)
+            if mem is None:
+                raise MemoryNotFoundError(f"Memory with ID {memory_id} does not exist.")
+
+            if not mem.needs_review:
+                existing_ack = self.repo.get_current_acknowledgement_log(memory_id)
+                if existing_ack is not None:
+                    return existing_ack
+                raise ValueError(f"Memory M{memory_id} is not marked for review.")
+
+            old_reason = mem.review_reason
+            self.repo.acknowledge_memory_review(memory_id)
+
+            expl = explanation or (
+                f"Review acknowledged for memory M{memory_id}"
+                + (f" by {reviewed_by}" if reviewed_by else "")
+                + (f" (cleared reason: '{old_reason}')" if old_reason else ".")
+            )
+            claim_json: dict[str, Any] = {
+                "trigger": "review_acknowledgement",
+                "memory_id": mem.id,
+                "entity_id": mem.entity_id,
+                "attribute": mem.attribute,
+                "context_key": mem.context_key,
+                "cleared_reason": old_reason,
+            }
+            if reviewed_by is not None:
+                claim_json["reviewed_by"] = reviewed_by
+
+            log_entry = DecisionLogEntry(
+                id=0,
+                message_id=mem.message_id,
+                claim_json=claim_json,
+                action=Action.ACKNOWLEDGE,
+                rule_id="R-ACKNOWLEDGE",
+                memory_id=mem.id,
+                affected_memory_ids=[mem.id],
+                scores={"confidence": mem.confidence},
+                explanation=expl,
+                created_at=eff_recorded_at,
+            )
+            return self.repo.insert_decision_log(log_entry)
 
     # =========================================================================
     # P4.1: Decision Log, Explain, and Invariant Checks
