@@ -299,6 +299,9 @@ class MemoryService:
     def ingest_claims(self, message: IngestMessage, claims: list[Claim],
                       *, recorded_at: datetime | None = None) -> IngestReport:                         # bypasses LLM (structured mode)
     def resolve_dispute(self, winner_memory_id: int) -> DecisionLogEntry:           # human action
+    def retract(self, memory_id: int, reason: str = "", *,
+                valid_to: datetime | None = None, recorded_at: datetime | None = None) -> DecisionLogEntry # memory retraction
+    retract_memory = retract                                                         # exact alias
     def acknowledge_review(self, memory_id: int, *, recorded_at: datetime | None = None,
                            reviewed_by: str | None = None, explanation: str | None = None) -> DecisionLogEntry # clear needs_review
     def get_dependencies(self, memory_id: int) -> list[Memory]                      # direct upstream foundations

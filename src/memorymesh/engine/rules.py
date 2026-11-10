@@ -37,6 +37,7 @@ from memorymesh.models import (
     Mutation,
     NewEvidence,
     NewMemory,
+    Polarity,
     Relation,
     ResolvedClaim,
     UpdateMemory,
@@ -136,6 +137,18 @@ def resolve(
         else 1.0
     )
     s_new = min(cfg.thresholds.max_confidence, s_new)
+
+    # Retract claim polarity (R-RETRACT, R-SKIP-NOTARGET, R-REJECT-RETRACT)
+    if rc.claim.polarity == Polarity.RETRACT:
+        return _produce_r_retract(
+            rc=rc,
+            chain=chain,
+            schema=schema,
+            cfg=cfg,
+            classify=classify,
+            recorded_at=recorded_at,
+            s_new=s_new,
+        )
 
     # 2. Filter candidate memories covering rc.valid_from
     cover = [m for m in chain if covers(m, rc.valid_from)]
@@ -938,7 +951,11 @@ def _produce_r_refine(
         action=Action.REFINE,
         rule_id="R-REFINE",
         explanation=explanation,
-        scores={"new_score": s_new, "old_score": 1.0},
+        scores={
+            "new_score": s_new,
+            "old_score": 1.0,
+            "is_historical_refine": 0.0,
+        },
         mutations=mutations,
         affected_memory_ids=affected_ids,
     )
@@ -1108,7 +1125,121 @@ def _produce_r_historical_refine(
         action=Action.REFINE,
         rule_id="R-REFINE",
         explanation=explanation,
-        scores={"new_score": s_new, "old_score": target.confidence},
+        scores={
+            "new_score": s_new,
+            "old_score": target.confidence,
+            "is_historical_refine": 1.0,
+            "target_original_valid_to_ts": target.valid_to.timestamp(),
+            "target_original_closed_at_ts": (
+                target.closed_at.timestamp() if target.closed_at is not None else 0.0
+            ),
+        },
         mutations=mutations,
+        affected_memory_ids=[target.id],
+    )
+
+
+def _produce_r_retract(
+    rc: ResolvedClaim,
+    chain: list[Memory],
+    schema: AttributeDef,
+    cfg: EngineConfig,
+    classify: Callable[[ResolvedClaim, Memory], Relation],
+    recorded_at: datetime,
+    s_new: float,
+) -> Decision:
+    """Build an R-RETRACT, R-SKIP-NOTARGET, or R-REJECT-RETRACT decision.
+
+    Specification (Section 4.4):
+    target = live memory with IDENTICAL value that covers rc.valid_from
+    if none:
+        SKIP (rule R-SKIP-NOTARGET, explanation "nothing to retract")
+    else:
+        if s_new >= effective_conf(target) * reject_ratio:
+            target -> HISTORICAL, valid_to = rc.valid_from, closed_at = recorded_at
+            affected = [target]
+        else:
+            R-REJECT-RETRACT (retraction too weak; logged, no change)
+    """
+    # 1. Find live memories that cover rc.valid_from
+    live = [
+        m
+        for m in chain
+        if m.status in (MemoryStatus.ACTIVE, MemoryStatus.DISPUTED) and covers(m, rc.valid_from)
+    ]
+
+    target: Memory | None = None
+    for m in live:
+        rel = classify(rc, m)
+        if rel == Relation.IDENTICAL or m.value_norm == rc.value_norm:
+            target = m
+            break
+
+    # If single-valued and claim has no explicit value, fallback to any live covering memory
+    if target is None and schema.cardinality == Cardinality.SINGLE and not rc.value_norm and live:
+        target = live[0]
+
+    if target is None:
+        return Decision(
+            action=Action.SKIP,
+            rule_id="R-SKIP-NOTARGET",
+            explanation=(
+                f"Nothing to retract: no active memory matching '{rc.value_norm}' "
+                f"covers valid_from {rc.valid_from.isoformat()}."
+            ),
+            scores={"s_new": s_new},
+            mutations=[],
+            affected_memory_ids=[],
+        )
+
+    # Validate temporal window: valid_to must be strictly greater than valid_from
+    if rc.valid_from <= target.valid_from:
+        raise InvalidValidityWindowError(
+            f"Cannot retract memory M{target.id}: retraction valid_from ({rc.valid_from}) "
+            f"must be strictly greater than target valid_from ({target.valid_from})."
+        )
+
+    target_score = _compute_memory_score(target, rc.valid_from, schema, cfg)
+    threshold = target_score * cfg.thresholds.reject_ratio
+
+    if s_new < threshold:
+        return Decision(
+            action=Action.REJECT,
+            rule_id="R-REJECT-RETRACT",
+            explanation=(
+                f"Retraction claim strength {s_new:.2f} is below threshold "
+                f"({threshold:.2f}) to retract memory M{target.id}."
+            ),
+            scores={
+                "s_new": s_new,
+                "target_score": target_score,
+                "reject_ratio": cfg.thresholds.reject_ratio,
+            },
+            mutations=[],
+            affected_memory_ids=[target.id],
+        )
+
+    return Decision(
+        action=Action.RETRACT,
+        rule_id="R-RETRACT",
+        explanation=(
+            f"Memory M{target.id} retracted as of {rc.valid_from.isoformat()} "
+            f"(closed_at={recorded_at.isoformat()})."
+        ),
+        scores={
+            "s_new": s_new,
+            "target_score": target_score,
+            "reject_ratio": cfg.thresholds.reject_ratio,
+        },
+        mutations=[
+            UpdateMemory(
+                memory_id=target.id,
+                fields={
+                    "status": MemoryStatus.HISTORICAL,
+                    "valid_to": rc.valid_from,
+                    "closed_at": recorded_at,
+                },
+            )
+        ],
         affected_memory_ids=[target.id],
     )

@@ -307,19 +307,35 @@ class Repository:
                 ) from exc
             raise RepositoryError(f"Database integrity error: {exc}") from exc
 
-    def get_memory(self, memory_id: int, include_evidence: bool = True) -> Memory | None:
-        """Retrieve a Memory by ID, optionally populating its associated evidence list."""
-        sql = """
+    def get_memory(
+        self,
+        memory_id: int,
+        include_evidence: bool = True,
+        known_at: datetime | None = None,
+    ) -> Memory | None:
+        """Retrieve a Memory by ID, populating evidence and reconstructing belief."""
+        if known_at is not None:
+            if known_at.tzinfo is None or known_at.utcoffset() is None:
+                raise ValueError("known_at must be a timezone-aware datetime.")
+            known_at = known_at.astimezone(UTC)
+
+        clauses = ["m.id = ?"]
+        params: list[Any] = [memory_id]
+        if known_at is not None:
+            clauses.append("m.recorded_at <= ?")
+            params.append(format_datetime_utc(known_at))
+
+        sql = f"""
         SELECT m.*, e.canonical_name AS entity_name
         FROM memories m
         LEFT JOIN entities e ON m.entity_id = e.id
-        WHERE m.id = ?
+        WHERE {" AND ".join(clauses)}
         """
-        cursor = self.conn.execute(sql, (memory_id,))
+        cursor = self.conn.execute(sql, params)
         row = cursor.fetchone()
         if row is None:
             return None
-        return self._row_to_memory(row, include_evidence=include_evidence)
+        return self._row_to_memory(row, include_evidence=include_evidence, known_at=known_at)
 
     def update_memory(
         self,
@@ -454,18 +470,27 @@ class Repository:
         include_rejected: bool = False,
     ) -> list[Memory]:
         """Find memories matching temporal criteria, ordered valid_from DESC, id DESC."""
+        if known_at is not None:
+            if known_at.tzinfo is None or known_at.utcoffset() is None:
+                raise ValueError("known_at must be a timezone-aware datetime.")
+            known_at = known_at.astimezone(UTC)
+
         clauses = ["m.entity_id = ?", "m.attribute = ?"]
         params: list[Any] = [entity_id, attribute]
+        known_str = format_datetime_utc(known_at) if known_at is not None else None
 
         if not include_rejected:
-            clauses.append("m.status != 'rejected'")
+            if known_str is not None:
+                clauses.append("(m.status != 'rejected' OR m.closed_at > ?)")
+                params.append(known_str)
+            else:
+                clauses.append("m.status != 'rejected'")
 
         if context_key is not None:
             clauses.append("m.context_key = ?")
             params.append(_canonicalize_context_key(context_key))
 
-        if known_at is not None:
-            known_str = format_datetime_utc(known_at)
+        if known_str is not None:
             clauses.append("m.recorded_at <= ?")
             params.append(known_str)
 
@@ -491,14 +516,115 @@ class Repository:
         """
         cursor = self.conn.execute(sql, params)
         rows = cursor.fetchall()
-        return [self._row_to_memory(r, include_evidence=True) for r in rows]
+        memories = [self._row_to_memory(r, include_evidence=True, known_at=known_at) for r in rows]
+        if valid_at is not None:
+            memories = [
+                m
+                for m in memories
+                if m.valid_from <= valid_at and (m.valid_to is None or valid_at < m.valid_to)
+            ]
+        return memories
 
-    def _row_to_memory(self, row: sqlite3.Row, include_evidence: bool = True) -> Memory:
+    def _row_to_memory(
+        self,
+        row: sqlite3.Row,
+        include_evidence: bool = True,
+        known_at: datetime | None = None,
+    ) -> Memory:
         """Convert a SQLite Row into a typed Memory model."""
         memory_id = int(row["id"])
         evidence_list: list[Evidence] = []
         if include_evidence:
             evidence_list = self.get_evidence_for_memory(memory_id)
+
+        db_closed_at = parse_db_datetime(row["closed_at"])
+        db_valid_to = parse_db_datetime(row["valid_to"])
+        db_status = MemoryStatus(row["status"])
+
+        eff_closed_at = db_closed_at
+        eff_valid_to = db_valid_to
+        eff_status = db_status
+        eff_needs_review = bool(row["needs_review"])
+        eff_review_reason = str(row["review_reason"] or "")
+
+        if known_at is not None:
+            if known_at.tzinfo is None or known_at.utcoffset() is None:
+                raise ValueError("known_at must be a timezone-aware datetime.")
+            known_utc = known_at.astimezone(UTC)
+            # If a memory was rejected at a transaction time in the future of known_at,
+            # it was not rejected yet as of known_at.
+            if (
+                db_status == MemoryStatus.REJECTED
+                and db_closed_at is not None
+                and db_closed_at > known_utc
+            ):
+                if self.has_dispute_decision_log(memory_id, before_or_at=known_utc):
+                    eff_status = MemoryStatus.DISPUTED
+                    eff_closed_at = None
+                else:
+                    closure_time = self.get_active_closure_time(memory_id)
+                    if closure_time is not None and closure_time <= known_utc:
+                        eff_status = MemoryStatus.HISTORICAL
+                        eff_closed_at = closure_time
+                        eff_valid_to = closure_time
+                    elif not self.is_created_as_historical(memory_id):
+                        eff_status = MemoryStatus.ACTIVE
+                        eff_closed_at = None
+                        eff_valid_to = None
+
+            # If an ACTIVE memory was in dispute before known_at and dispute was not resolved yet
+            if (
+                eff_status == MemoryStatus.ACTIVE
+                and self.has_dispute_decision_log(memory_id, before_or_at=known_utc)
+                and not self.has_dispute_resolution_log(memory_id, before_or_at=known_utc)
+            ):
+                eff_status = MemoryStatus.DISPUTED
+
+            # If a memory is currently HISTORICAL:
+            if eff_status == MemoryStatus.HISTORICAL:
+                # If a historical refinement occurred strictly after known_at,
+                # roll back valid_to and closed_at to what was known as of known_at:
+                refine_before = self.get_historical_refinement_before_state(
+                    memory_id, after=known_utc
+                )
+                if refine_before is not None:
+                    orig_valid_to, orig_closed_at = refine_before
+                    eff_valid_to = orig_valid_to
+                    eff_closed_at = orig_closed_at
+
+                # If closure occurred strictly after known_at, reconstruct earlier status:
+                if eff_closed_at is not None and eff_closed_at > known_utc:
+                    # 3a. If it was under an active unresolved dispute on or before known_at:
+                    if self.has_dispute_decision_log(
+                        memory_id, before_or_at=known_utc
+                    ) and not self.has_dispute_resolution_log(memory_id, before_or_at=known_utc):
+                        eff_status = MemoryStatus.DISPUTED
+                        eff_closed_at = None
+                        eff_valid_to = None
+                    else:
+                        # 3b. Reconstruct as ACTIVE only if persisted lifecycle evidence proves
+                        # that the memory was previously ACTIVE and its transition to HISTORICAL
+                        # happened after known_at:
+                        was_active = False
+                        if not self.is_created_as_historical(memory_id):
+                            if self.has_closure_decision_after(memory_id, after=known_utc):
+                                was_active = True
+                            elif (
+                                not self.has_any_decision_log(memory_id)
+                                and db_closed_at is not None
+                                and db_valid_to is not None
+                                and db_closed_at > db_valid_to
+                            ):
+                                was_active = True
+
+                        if was_active:
+                            eff_status = MemoryStatus.ACTIVE
+                            eff_closed_at = None
+                            eff_valid_to = None
+
+            if eff_status == MemoryStatus.DISPUTED and not eff_needs_review:
+                eff_needs_review = True
+                eff_review_reason = "Under active dispute; pending resolution"
 
         return Memory(
             id=memory_id,
@@ -510,13 +636,13 @@ class Repository:
             context=json.loads(row["context_json"] or "{}"),
             context_key=str(row["context_key"] or ""),
             valid_from=parse_db_datetime(row["valid_from"]),  # type: ignore[arg-type]
-            valid_to=parse_db_datetime(row["valid_to"]),
+            valid_to=eff_valid_to,
             recorded_at=parse_db_datetime(row["recorded_at"]),  # type: ignore[arg-type]
-            closed_at=parse_db_datetime(row["closed_at"]),
-            status=MemoryStatus(row["status"]),
+            closed_at=eff_closed_at,
+            status=eff_status,
             confidence=float(row["confidence"]),
-            needs_review=bool(row["needs_review"]),
-            review_reason=str(row["review_reason"] or ""),
+            needs_review=eff_needs_review,
+            review_reason=eff_review_reason,
             raw_text=str(row["raw_text"] or ""),
             message_id=int(row["message_id"]),
             source_id=str(row["source_id"]),
@@ -617,9 +743,24 @@ class Repository:
         reason: str = "",
         created_at: datetime | None = None,
     ) -> int:
-        """Insert a relationship edge between two memories."""
+        """Insert a relationship edge between two memories.
+
+        Idempotent: if edge (src_memory_id, dst_memory_id, type) already exists,
+        returns the existing edge ID without error.
+        """
         type_str = edge_type.value if hasattr(edge_type, "value") else str(edge_type)
         created_str = format_datetime_utc(created_at or datetime.now(UTC))
+
+        # Idempotency check: preserve existing edge and avoid unique constraint failure
+        existing = self.conn.execute(
+            """
+            SELECT id FROM edges
+            WHERE src_memory_id = ? AND dst_memory_id = ? AND type = ?
+            """,
+            (src_memory_id, dst_memory_id, type_str),
+        ).fetchone()
+        if existing is not None:
+            return int(existing["id"])
 
         sql = """
         INSERT INTO edges (src_memory_id, dst_memory_id, type, reason, created_at)
@@ -866,13 +1007,14 @@ class Repository:
                     nbr = self.get_memory(nbr_id)
                     if (
                         nbr is not None
-                        and nbr.status == MemoryStatus.DISPUTED
+                        and nbr.status in (MemoryStatus.DISPUTED, MemoryStatus.HISTORICAL)
                         and nbr.entity_id == root.entity_id
                         and nbr.attribute == root.attribute
                         and nbr.context_key == root.context_key
                     ):
-                        queue.append(nbr)
                         group.append(nbr)
+                        if nbr.status == MemoryStatus.DISPUTED:
+                            queue.append(nbr)
 
         return group
 
@@ -881,21 +1023,33 @@ class Repository:
         entity_id: int | None = None,
         attribute: str | None = None,
         context_key: str | None = None,
+        known_at: datetime | None = None,
     ) -> list[tuple[Memory, Memory, str]]:
         """Retrieve unique pairs of memories connected by active contradicts edges.
 
-        Both memories in each returned pair must currently have status == 'disputed'
+        Both memories in each returned pair must have status == 'disputed' as of known_at
         and identical entity_id, attribute, and context_key.
         """
+        if known_at is not None:
+            if known_at.tzinfo is None or known_at.utcoffset() is None:
+                raise ValueError("known_at must be a timezone-aware datetime.")
+            known_at = known_at.astimezone(UTC)
+
         clauses = [
             "e.type = 'contradicts'",
-            "ma.status = 'disputed'",
-            "mb.status = 'disputed'",
             "ma.entity_id = mb.entity_id",
             "ma.attribute = mb.attribute",
             "ma.context_key = mb.context_key",
         ]
         params: list[Any] = []
+
+        if known_at is not None:
+            clauses.append("e.created_at <= ?")
+            params.append(format_datetime_utc(known_at))
+        else:
+            clauses.append("(ma.status = 'disputed' OR mb.status = 'disputed')")
+            clauses.append("ma.status IN ('disputed', 'historical')")
+            clauses.append("mb.status IN ('disputed', 'historical')")
 
         if entity_id is not None:
             clauses.append("ma.entity_id = ?")
@@ -931,10 +1085,18 @@ class Repository:
             if pair_key in seen_pairs:
                 continue
             seen_pairs.add(pair_key)
-            mem_a = self.get_memory(pair_key[0])
-            mem_b = self.get_memory(pair_key[1])
+            mem_a = self.get_memory(pair_key[0], known_at=known_at)
+            mem_b = self.get_memory(pair_key[1], known_at=known_at)
             if mem_a is not None and mem_b is not None:
-                pairs.append((mem_a, mem_b, str(row["edge_reason"] or "")))
+                is_disputed_pair = (
+                    mem_a.status == MemoryStatus.DISPUTED
+                    and mem_b.status in (MemoryStatus.DISPUTED, MemoryStatus.HISTORICAL)
+                ) or (
+                    mem_b.status == MemoryStatus.DISPUTED
+                    and mem_a.status in (MemoryStatus.DISPUTED, MemoryStatus.HISTORICAL)
+                )
+                if is_disputed_pair:
+                    pairs.append((mem_a, mem_b, str(row["edge_reason"] or "")))
 
         return pairs
 
@@ -1244,6 +1406,212 @@ class Repository:
         if row and row["rule_id"] == "R-ACKNOWLEDGE":
             return self._row_to_decision_log(row)
         return None
+
+    def has_dispute_decision_log(
+        self,
+        memory_id: int,
+        before_or_at: datetime | None = None,
+    ) -> bool:
+        """Check whether an R-DISPUTE decision was logged for a memory on or before before_or_at."""
+        sql = """
+        SELECT 1 FROM decision_log
+        WHERE rule_id = 'R-DISPUTE'
+          AND (
+              memory_id = ?
+              OR json_extract(claim_json, '$.memory_id') = ?
+              OR EXISTS (
+                  SELECT 1 FROM json_each(affected_ids_json) WHERE value = ?
+              )
+          )
+        """
+        params: list[Any] = [memory_id, memory_id, memory_id]
+        if before_or_at is not None:
+            if before_or_at.tzinfo is None or before_or_at.utcoffset() is None:
+                raise ValueError("before_or_at must be a timezone-aware datetime.")
+            sql += " AND created_at <= ?"
+            params.append(format_datetime_utc(before_or_at.astimezone(UTC)))
+        sql += " LIMIT 1"
+        row = self.conn.execute(sql, params).fetchone()
+        return row is not None
+
+    def has_dispute_resolution_log(
+        self,
+        memory_id: int,
+        before_or_at: datetime | None = None,
+    ) -> bool:
+        """Check whether dispute resolution was logged on or before before_or_at."""
+        sql = """
+        SELECT 1 FROM decision_log
+        WHERE rule_id = 'R-DISPUTE-RESOLVE'
+          AND (
+              memory_id = ?
+              OR EXISTS (
+                  SELECT 1 FROM json_each(affected_ids_json) WHERE value = ?
+              )
+          )
+        """
+        params: list[Any] = [memory_id, memory_id]
+        if before_or_at is not None:
+            if before_or_at.tzinfo is None or before_or_at.utcoffset() is None:
+                raise ValueError("before_or_at must be a timezone-aware datetime.")
+            sql += " AND created_at <= ?"
+            params.append(format_datetime_utc(before_or_at.astimezone(UTC)))
+        sql += " LIMIT 1"
+        row = self.conn.execute(sql, params).fetchone()
+        return row is not None
+
+    def get_active_closure_time(
+        self,
+        memory_id: int,
+    ) -> datetime | None:
+        """Get the transaction timestamp when memory_id transitioned from ACTIVE to HISTORICAL.
+
+        Returns None if memory_id was never closed from an active state (e.g. backfill,
+        historical refinement segment, or unresolved dispute).
+        """
+        sql = """
+        SELECT created_at FROM decision_log
+        WHERE (
+            (rule_id = 'R-REPLACE' AND EXISTS (
+                SELECT 1 FROM json_each(affected_ids_json) WHERE value = ?
+            ))
+            OR
+            (rule_id = 'R-REFINE' AND (
+                json_extract(scores_json, '$.is_historical_refine') IS NULL
+                OR json_extract(scores_json, '$.is_historical_refine') = 0
+            ) AND EXISTS (
+                SELECT 1 FROM json_each(affected_ids_json) WHERE value = ?
+            ))
+            OR
+            (rule_id = 'R-RETRACT' AND (
+                memory_id = ?
+                OR EXISTS (
+                    SELECT 1 FROM json_each(affected_ids_json) WHERE value = ?
+                )
+            ))
+            OR
+            (rule_id = 'R-DISPUTE-RESOLVE' AND (
+                EXISTS (
+                    SELECT 1 FROM json_each(json_extract(claim_json, '$.closed_memory_ids'))
+                    WHERE value = ?
+                )
+                OR (
+                    json_extract(claim_json, '$.closed_memory_ids') IS NULL
+                    AND EXISTS (
+                        SELECT 1 FROM json_each(json_extract(claim_json, '$.loser_memory_ids'))
+                        WHERE value = ?
+                    )
+                )
+            ))
+        )
+        ORDER BY created_at ASC, id ASC
+        LIMIT 1
+        """
+        params = [memory_id, memory_id, memory_id, memory_id, memory_id, memory_id]
+        row = self.conn.execute(sql, params).fetchone()
+        if row is None:
+            return None
+        return parse_db_datetime(row["created_at"])
+
+    def get_historical_refinement_before_state(
+        self,
+        memory_id: int,
+        after: datetime,
+    ) -> tuple[datetime | None, datetime | None] | None:
+        """If memory_id was affected by a historical refinement occurring strictly after 'after',
+        returns the target's original (valid_to, closed_at) prior to that refinement.
+
+        If multiple refinements occurred after 'after', returns the state prior to the
+        earliest refinement after 'after'.
+        """
+        if after.tzinfo is None or after.utcoffset() is None:
+            raise ValueError("after must be a timezone-aware datetime.")
+        after_utc = after.astimezone(UTC)
+        sql = """
+        SELECT scores_json FROM decision_log
+        WHERE created_at > ?
+          AND rule_id = 'R-REFINE'
+          AND json_extract(scores_json, '$.is_historical_refine') = 1
+          AND EXISTS (SELECT 1 FROM json_each(affected_ids_json) WHERE value = ?)
+        ORDER BY created_at ASC, id ASC
+        LIMIT 1
+        """
+        row = self.conn.execute(sql, (format_datetime_utc(after_utc), memory_id)).fetchone()
+        if row is None:
+            return None
+        scores = json.loads(row["scores_json"] or "{}")
+        valid_to_ts = scores.get("target_original_valid_to_ts")
+        closed_at_ts = scores.get("target_original_closed_at_ts")
+        orig_valid_to = datetime.fromtimestamp(valid_to_ts, tz=UTC) if valid_to_ts else None
+        orig_closed_at = (
+            datetime.fromtimestamp(closed_at_ts, tz=UTC)
+            if closed_at_ts and closed_at_ts > 0
+            else None
+        )
+        return (orig_valid_to, orig_closed_at)
+
+    def has_closure_decision_after(
+        self,
+        memory_id: int,
+        after: datetime,
+    ) -> bool:
+        """Check whether a decision closing memory_id from active occurred after 'after'."""
+        if after.tzinfo is None or after.utcoffset() is None:
+            raise ValueError("after must be a timezone-aware datetime.")
+        after_utc = after.astimezone(UTC)
+        closure_time = self.get_active_closure_time(memory_id)
+        if closure_time is None:
+            return False
+        return closure_time > after_utc
+
+    def is_backfill_memory(self, memory_id: int) -> bool:
+        """Check whether memory_id was created through an R-BACKFILL decision."""
+        sql = """
+        SELECT 1 FROM decision_log
+        WHERE rule_id = 'R-BACKFILL' AND memory_id = ?
+        LIMIT 1
+        """
+        row = self.conn.execute(sql, (memory_id,)).fetchone()
+        return row is not None
+
+    def is_created_as_historical(self, memory_id: int) -> bool:
+        """Check whether memory_id was created with status HISTORICAL."""
+        sql = """
+        SELECT 1 FROM decision_log
+        WHERE memory_id = ?
+          AND (
+              rule_id = 'R-BACKFILL'
+              OR (
+                  rule_id = 'R-REFINE'
+                  AND json_extract(scores_json, '$.is_historical_refine') = 1
+              )
+          )
+        LIMIT 1
+        """
+        row = self.conn.execute(sql, (memory_id,)).fetchone()
+        return row is not None
+
+    def has_any_decision_log(self, memory_id: int) -> bool:
+        """Check whether any decision log exists affecting memory_id."""
+        sql = """
+        SELECT 1 FROM decision_log
+        WHERE memory_id = ? OR EXISTS (
+            SELECT 1 FROM json_each(affected_ids_json) WHERE value = ?
+        )
+        LIMIT 1
+        """
+        row = self.conn.execute(sql, (memory_id, memory_id)).fetchone()
+        return row is not None
+
+    def get_retraction_log(self, memory_id: int) -> DecisionLogEntry | None:
+        """Retrieve the most recent R-RETRACT decision log entry for a memory."""
+        sql = """
+        SELECT * FROM decision_log
+        WHERE rule_id = 'R-RETRACT' AND memory_id = ?
+        ORDER BY id DESC LIMIT 1
+        """
+        row = self.conn.execute(sql, (memory_id,)).fetchone()
+        return self._row_to_decision_log(row) if row else None
 
     def _row_to_decision_log(self, r: sqlite3.Row) -> DecisionLogEntry:
         """Convert a database row into a DecisionLogEntry domain object."""

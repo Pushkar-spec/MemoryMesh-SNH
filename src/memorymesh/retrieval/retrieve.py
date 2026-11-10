@@ -7,7 +7,7 @@ Implements the half-open validity interval: valid_from <= requested_time < valid
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 
 from memorymesh.models import Memory
 from memorymesh.repository import Repository
@@ -96,6 +96,11 @@ def retrieve_valid_memories(
     - Selects memories from the highest specificity group (len(memory.context)).
     - Returns memories ordered deterministically: context_key ASC, valid_from DESC, id ASC.
     """
+    if known_at is not None:
+        if known_at.tzinfo is None or known_at.utcoffset() is None:
+            raise ValueError("known_at must be a timezone-aware datetime.")
+        known_at = known_at.astimezone(UTC)
+
     all_candidates = repo.find_memories(
         entity_id=entity_id,
         attribute=attribute,
@@ -166,7 +171,12 @@ def retrieve_as_of(
     known_at: datetime | None = None,
 ) -> Memory | None:
     """Retrieve memory valid as of historical timestamp valid_at (defaults known_at to valid_at)."""
-    effective_known_at = valid_at if known_at is None else known_at
+    if known_at is not None:
+        if known_at.tzinfo is None or known_at.utcoffset() is None:
+            raise ValueError("known_at must be a timezone-aware datetime.")
+        effective_known_at = known_at.astimezone(UTC)
+    else:
+        effective_known_at = valid_at
     return retrieve_temporal_memory(
         repo=repo,
         entity_id=entity_id,

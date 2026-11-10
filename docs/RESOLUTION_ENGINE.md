@@ -177,14 +177,37 @@ When a claim arrives for a historical interval that precedes an existing memory 
 6. **Design Limitation:** The engine never automatically rewrites previously closed historical windows. If an older claim falls into a closed historical window, it corroborates if identical/refining, or disputes/rejects if conflicting.
 
 ### 4.4 Retract (`R-RETRACT`)
-Claim: "Server A no longer runs service Y." (`polarity = retract`).
+
+Retraction closes an active or disputed memory when a fact ceases to be true or is explicitly withdrawn.
+
+#### Claim-Level Retraction (`Polarity.RETRACT`)
+Claim: "Server A no longer runs service Y." (`claim.polarity = Polarity.RETRACT`).
 ```text
 target = live memory with IDENTICAL value that covers rc.valid_from
-if none:  SKIP (rule R-SKIP-NOTARGET, explanation "nothing to retract")
-else:     if s_new >= effective_conf(target) * reject_ratio:
-              target -> HISTORICAL, valid_to = rc.valid_from, closed_at = recorded_at; affected = [target]
-          else: R-REJECT-RETRACT (retraction too weak; logged, no change)
+if none:
+    SKIP (rule R-SKIP-NOTARGET, explanation "nothing to retract")
+else:
+    if rc.valid_from <= target.valid_from:
+        raise InvalidValidityWindowError (valid_to must be strictly greater than valid_from)
+    if s_new >= effective_conf(target) * reject_ratio:
+        target -> HISTORICAL, valid_to = rc.valid_from, closed_at = recorded_at; affected = [target]
+    else:
+        R-REJECT-RETRACT (retraction too weak; logged, no change)
 ```
+
+#### Service-Level Retraction (`service.retract` / `service.retract_memory`)
+Direct administrative or programmatic retraction of an existing memory:
+- **Signature:** `service.retract(memory_id, reason="", *, valid_to=None, recorded_at=None) -> DecisionLogEntry`.
+- **Alias:** `service.retract_memory = service.retract`.
+- **Target Status:** Valid targets are memories with status `ACTIVE` or `DISPUTED`.
+- **Lifecycle Invariants:**
+  - Retracting a memory with status `REJECTED` raises `InvalidLifecycleTransitionError`.
+  - Retracting a memory with status `HISTORICAL` that was superseded raises `InvalidLifecycleTransitionError`.
+  - Retracting an already-retracted memory is **idempotent**: it returns the existing `R-RETRACT` decision log entry without duplicating logs or mutating state.
+- **Validity Window:** `valid_to` must be strictly greater than `target.valid_from`. If `valid_to <= target.valid_from`, `InvalidValidityWindowError` is raised. Defaults to `recorded_at`.
+- **Evidence Preservation:** Supporting evidence rows are never erased or altered.
+- **Audit Logging:** Logs a `DecisionLogEntry` with `rule_id = "R-RETRACT"`, `action = Action.RETRACT`.
+- **Dependency Propagation:** Atomically propagates downstream changes to all active/disputed dependent memories reachable via `DEPENDS_ON` edges, setting `needs_review = True`, `review_reason = "... retracted"`, and logging `R-PROPAGATE`.
 
 ### 4.5 Dispute resolution by a human (`R-DISPUTE-RESOLVE`)
 `MemoryService.resolve_dispute(winner_id)` explicitly resolves an active dispute in favor of a designated winner memory.

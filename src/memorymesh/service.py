@@ -45,6 +45,8 @@ from memorymesh.engine.propagate import (
 from memorymesh.engine.rules import resolve
 from memorymesh.errors import (
     ForeignKeyConstraintError,
+    InvalidLifecycleTransitionError,
+    InvalidValidityWindowError,
     MemoryNotFoundError,
     NormalizationError,
     UnknownSourceError,
@@ -78,6 +80,7 @@ from memorymesh.models import (
     Source,
     UpdateMemory,
     ValueType,
+    format_datetime_utc,
 )
 from memorymesh.repository import Repository
 from memorymesh.retrieval.retrieve import (
@@ -508,11 +511,28 @@ class MemoryService:
                 saved_log = self.repo.insert_decision_log(log_entry)
                 decisions_log.append(saved_log)
 
-                # P5.1: Propagate changes downstream if an existing memory was affected
+                # P5.1 / P6.2: Propagate changes downstream if an existing memory was affected
                 if decision.rule_id in ("R-REPLACE", "R-DISPUTE", "R-RETRACT"):
-                    changed_ids = [
-                        m_id for m_id in decision.affected_memory_ids if m_id != primary_mem_id
-                    ]
+                    if decision.rule_id == "R-RETRACT":
+                        changed_ids = list(decision.affected_memory_ids)
+                        for m_id in changed_ids:
+                            dispute_nbrs = self.repo.get_dispute_group(m_id)
+                            for nbr in dispute_nbrs:
+                                if nbr.id != m_id and nbr.status == MemoryStatus.DISPUTED:
+                                    self.repo.update_memory(
+                                        nbr.id,
+                                        {
+                                            "needs_review": True,
+                                            "review_reason": (
+                                                f"Conflicting memory M{m_id} was retracted; "
+                                                "pending dispute resolution"
+                                            ),
+                                        },
+                                    )
+                    else:
+                        changed_ids = [
+                            m_id for m_id in decision.affected_memory_ids if m_id != primary_mem_id
+                        ]
                     if changed_ids:
                         if decision.rule_id == "R-REPLACE":
                             cause = (
@@ -582,11 +602,26 @@ class MemoryService:
 
             losers = [m for m in group if m.id != winner_memory_id]
 
-            self.repo.update_memory(winner.id, {"status": MemoryStatus.ACTIVE})
+            self.repo.update_memory(
+                winner.id,
+                {"status": MemoryStatus.ACTIVE, "needs_review": False, "review_reason": ""},
+            )
 
             loser_summaries: list[str] = []
             for loser in losers:
-                if loser.valid_from < winner.valid_from:
+                if loser.status == MemoryStatus.HISTORICAL:
+                    # Already historical (e.g. retracted counterpart)
+                    self.repo.insert_edge(
+                        src_memory_id=winner.id,
+                        dst_memory_id=loser.id,
+                        edge_type=EdgeType.SUPERSEDES,
+                        reason="dispute resolution: winner supersedes retracted claim",
+                        created_at=eff_recorded_at,
+                    )
+                    loser_summaries.append(
+                        f"M{loser.id} (already HISTORICAL) superseded by winner M{winner.id}"
+                    )
+                elif loser.valid_from < winner.valid_from:
                     self.repo.update_memory(
                         loser.id,
                         {
@@ -624,6 +659,11 @@ class MemoryService:
                 f"('{winner.value_display}', confidence={winner.confidence:.2f}). "
                 + "; ".join(loser_summaries)
             )
+            closed_loser_ids = [
+                loser.id
+                for loser in losers
+                if loser.status == MemoryStatus.DISPUTED and loser.valid_from < winner.valid_from
+            ]
             claim_summary = {
                 "entity_id": winner.entity_id,
                 "attribute": winner.attribute,
@@ -631,6 +671,7 @@ class MemoryService:
                 "winner_memory_id": winner.id,
                 "winner_value": winner.value_display,
                 "loser_memory_ids": [loser.id for loser in losers],
+                "closed_memory_ids": closed_loser_ids,
             }
             log_entry = DecisionLogEntry(
                 id=0,
@@ -658,6 +699,140 @@ class MemoryService:
                 )
 
             return saved_log
+
+    def retract(
+        self,
+        memory_id: int,
+        reason: str = "",
+        *,
+        valid_to: datetime | None = None,
+        recorded_at: datetime | None = None,
+    ) -> DecisionLogEntry:
+        """Retract an active or disputed memory.
+
+        - Marks the memory as HISTORICAL with valid_to and closed_at.
+        - Idempotent: repeated retractions on an already-retracted memory return existing log.
+        - Validates lifecycle: attempting to retract a REJECTED memory or a non-retracted
+          HISTORICAL memory raises InvalidLifecycleTransitionError.
+        - Validates temporal window: valid_to must be strictly greater than target valid_from.
+        - Propagates change downstream to dependents (needs_review=True, R-PROPAGATE).
+        - Atomic: executed within a transaction.
+        """
+        raw_recorded_at = recorded_at if recorded_at is not None else self.clock()
+        if raw_recorded_at.tzinfo is None or raw_recorded_at.utcoffset() is None:
+            raise ValueError("Recorded timestamp must be a timezone-aware datetime.")
+        eff_recorded_at = raw_recorded_at.astimezone(UTC)
+
+        if valid_to is not None:
+            if valid_to.tzinfo is None or valid_to.utcoffset() is None:
+                raise ValueError("valid_to timestamp must be a timezone-aware datetime.")
+            eff_valid_to = valid_to.astimezone(UTC)
+        else:
+            eff_valid_to = eff_recorded_at
+
+        with self.repo.transaction():
+            target = self.repo.get_memory(memory_id)
+            if target is None:
+                raise MemoryNotFoundError(f"Memory M{memory_id} not found.")
+
+            # Idempotency check: if target is already HISTORICAL, check if it was retracted
+            if target.status == MemoryStatus.HISTORICAL:
+                retract_log = self.repo.get_retraction_log(memory_id)
+                if retract_log is not None:
+                    return retract_log
+                raise InvalidLifecycleTransitionError(
+                    f"Cannot retract memory M{memory_id} with status 'historical' "
+                    "(already superseded or closed)."
+                )
+
+            if target.status == MemoryStatus.REJECTED:
+                raise InvalidLifecycleTransitionError(
+                    f"Cannot retract memory M{memory_id} with status 'rejected'."
+                )
+
+            # Temporal validity check: valid_to must be strictly greater than valid_from
+            if eff_valid_to <= target.valid_from:
+                raise InvalidValidityWindowError(
+                    f"Cannot retract memory M{memory_id}: valid_to ({eff_valid_to}) "
+                    f"must be strictly greater than valid_from ({target.valid_from})."
+                )
+
+            # Identify any conflicting memories in dispute before updating status
+            was_disputed = target.status == MemoryStatus.DISPUTED
+            dispute_counterparts = (
+                [m for m in self.repo.get_dispute_group(memory_id) if m.id != memory_id]
+                if was_disputed
+                else []
+            )
+
+            # Transition memory to HISTORICAL
+            self.repo.update_memory(
+                memory_id,
+                {
+                    "status": MemoryStatus.HISTORICAL,
+                    "valid_to": eff_valid_to,
+                    "closed_at": eff_recorded_at,
+                },
+            )
+
+            if was_disputed:
+                for nbr in dispute_counterparts:
+                    if nbr.status == MemoryStatus.DISPUTED:
+                        self.repo.update_memory(
+                            nbr.id,
+                            {
+                                "needs_review": True,
+                                "review_reason": (
+                                    f"Conflicting memory M{memory_id} was retracted; "
+                                    "pending dispute resolution"
+                                ),
+                            },
+                        )
+
+            msg_id = target.message_id
+            if msg_id is None:
+                msg_id = self.repo.insert_message(
+                    source_id=target.source_id or "system",
+                    text=f"Retraction for memory M{memory_id}: {reason or 'Manual retraction'}",
+                    event_time=eff_recorded_at,
+                    ingested_at=eff_recorded_at,
+                )
+
+            explanation_text = reason or (
+                f"Memory M{memory_id} retracted as of {eff_valid_to.isoformat()} "
+                f"(closed_at={eff_recorded_at.isoformat()})."
+            )
+            log_entry = DecisionLogEntry(
+                id=0,
+                message_id=msg_id,
+                claim_json={
+                    "memory_id": memory_id,
+                    "polarity": "retract",
+                    "reason": reason,
+                    "valid_to": format_datetime_utc(eff_valid_to),
+                },
+                action=Action.RETRACT,
+                rule_id="R-RETRACT",
+                memory_id=memory_id,
+                affected_memory_ids=[memory_id],
+                scores={},
+                explanation=explanation_text,
+                created_at=eff_recorded_at,
+            )
+            saved_log = self.repo.insert_decision_log(log_entry)
+
+            # Downstream propagation
+            self.propagate_change(
+                changed_ids=[memory_id],
+                cause_text="retracted",
+                recorded_at=eff_recorded_at,
+                message_id=msg_id,
+                trigger_mode="automatic",
+            )
+
+            return saved_log
+
+    retract_memory = retract
 
     # =========================================================================
     # Read: Retrieval
@@ -704,7 +879,12 @@ class MemoryService:
     ) -> QueryResult:
         """Query memory valid at valid_at (defaults to now) as known at known_at."""
         req_valid_at = valid_at or now
-        req_known_at = known_at or now
+        if known_at is not None:
+            if known_at.tzinfo is None or known_at.utcoffset() is None:
+                raise ValueError("known_at must be a timezone-aware datetime.")
+            req_known_at = known_at.astimezone(UTC)
+        else:
+            req_known_at = now
 
         plan = QueryPlan(
             intent="current" if valid_at is None else "as_of",
@@ -754,6 +934,7 @@ class MemoryService:
             entity_id=entity_id,
             attribute=attribute,
             context_key=ctx_key,
+            known_at=req_known_at,
         )
         if not disputed_pairs and any(
             item.scope_match in ("inherited_global", "inherited_partial") for item in items
@@ -762,6 +943,7 @@ class MemoryService:
                 entity_id=entity_id,
                 attribute=attribute,
                 context_key="",
+                known_at=req_known_at,
             )
         dispute_views = [
             DisputeView(
@@ -801,8 +983,13 @@ class MemoryService:
             ambiguity_reason=ambiguity_reason,
         )
 
-    def disputes(self, entity: str | None = None) -> list[DisputeView]:
-        """Retrieve all active disputes, optionally filtered by entity name."""
+    def disputes(
+        self,
+        entity: str | None = None,
+        *,
+        known_at: datetime | None = None,
+    ) -> list[DisputeView]:
+        """Retrieve active disputes, optionally filtered by entity name and belief time."""
         entity_id: int | None = None
         if entity is not None:
             ent = self.repo.get_entity_by_name(entity)
@@ -812,15 +999,23 @@ class MemoryService:
                 return []
             entity_id = int(ent["id"])
 
-        ref_time = self.clock()
-        if ref_time.tzinfo is None or ref_time.utcoffset() is None:
-            raise ValueError("Clock must return a timezone-aware datetime.")
+        if known_at is not None:
+            if known_at.tzinfo is None or known_at.utcoffset() is None:
+                raise ValueError("known_at must be a timezone-aware datetime.")
+            known_utc = known_at.astimezone(UTC)
+        else:
+            known_utc = None
 
-        pairs = self.repo.find_disputed_pairs(entity_id=entity_id)
+        ref_time = known_utc if known_utc is not None else self.clock()
+        if ref_time.tzinfo is None or ref_time.utcoffset() is None:
+            raise ValueError("Reference time must be a timezone-aware datetime.")
+        ref_time_utc = ref_time.astimezone(UTC)
+
+        pairs = self.repo.find_disputed_pairs(entity_id=entity_id, known_at=known_utc)
         return [
             DisputeView(
-                a=self._build_memory_view(pair[0], ref_time),
-                b=self._build_memory_view(pair[1], ref_time),
+                a=self._build_memory_view(pair[0], ref_time_utc),
+                b=self._build_memory_view(pair[1], ref_time_utc),
                 edge_reason=pair[2],
             )
             for pair in pairs
@@ -934,6 +1129,7 @@ class MemoryService:
         context: dict[str, str] | None = None,
         *,
         now: datetime,
+        known_at: datetime | None = None,
     ) -> Memory | None:
         """Convenience method returning the single unambiguous ACTIVE Memory at now, or None.
 
@@ -941,7 +1137,13 @@ class MemoryService:
         or no active result, returns None to avoid treating disputed or ambiguous facts
         as authoritative. Detailed results remain accessible via self.current().
         """
-        res = self.current(entity=entity, attribute=attribute, context=context, now=now)
+        res = self.current(
+            entity=entity,
+            attribute=attribute,
+            context=context,
+            now=now,
+            known_at=known_at,
+        )
         # Any disputed memory in items means the attribute is under dispute
         if any(item.memory.status == MemoryStatus.DISPUTED for item in res.items):
             return None
@@ -1575,14 +1777,14 @@ class MemoryService:
         # Normal retrieval must never return memories with status == REJECTED
         rejected_memories = [m for m in all_memories if m.status == MemoryStatus.REJECTED]
         for rm in rejected_memories:
-            # Ensure known_at >= recorded_at so temporal/belief conditions don't filter out
-            # backfilled claims before checking the rejected-status filter
+            # Ensure known_at is on or after rejection time (closed_at or recorded_at)
+            # so the memory is evaluated within its rejected state.
             if rm.recorded_at.tzinfo is None or rm.recorded_at.utcoffset() is None:
                 raise ValueError(
                     f"Memory M{rm.id} has invalid timezone-naive recorded_at: {rm.recorded_at}. "
                     "All persisted timestamps must be timezone-aware."
                 )
-            known_at = rm.recorded_at.astimezone(UTC)
+            known_at = (rm.closed_at or rm.recorded_at).astimezone(UTC)
             retrieved = retrieve_valid_memories(
                 repo=self.repo,
                 entity_id=rm.entity_id,

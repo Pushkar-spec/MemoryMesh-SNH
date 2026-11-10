@@ -46,6 +46,10 @@ class InvalidValidityWindowError(EngineError, ValueError):
     """Raised when validity window dates violate logical or database constraints."""
 
 
+class InvalidLifecycleTransitionError(EngineError, ValueError):
+    """Raised when an operation attempts an invalid memory lifecycle status transition."""
+
+
 class ConflictResolutionError(EngineError, ValueError):
     """Raised when a conflict cannot be resolved under the active resolution rules."""
 
