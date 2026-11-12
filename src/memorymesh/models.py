@@ -441,16 +441,77 @@ class Decision(MeshBaseModel):
 # ==============================================================================
 
 
+class QueryIntent(StrEnum):
+    """Primary intent of a user query."""
+
+    CURRENT = "current"
+    AS_OF = "as_of"
+    HISTORY = "history"
+    WHY = "why"
+    IMPACT = "impact"
+    CONFLICTS = "conflicts"
+
+
+class TemporalIntent(StrEnum):
+    """Temporal scope requested by the user."""
+
+    CURRENT = "current"
+    AS_OF = "as_of"
+    HISTORY = "history"
+    ALL_TIME = "all_time"
+
+
+class QueryType(StrEnum):
+    """High-level category of query."""
+
+    FACT_LOOKUP = "fact_lookup"
+    EXPLANATION = "explanation"
+    DEPENDENCY_IMPACT = "dependency_impact"
+    DISPUTE_CHECK = "dispute_check"
+    TIMELINE_HISTORY = "timeline_history"
+
+
 class QueryPlan(MeshBaseModel):
     """Parsed query intent and retrieval criteria."""
 
-    intent: Literal["current", "as_of", "history", "why", "impact", "conflicts"]
+    intent: QueryIntent | Literal["current", "as_of", "history", "why", "impact", "conflicts"]
     entity: str | None = None
     attribute: str | None = None
     valid_at: datetime | None = None
     known_at: datetime | None = None
     context: dict[str, str] = Field(default_factory=dict)
     memory_id: int | None = None
+
+
+class ParsedQuery(MeshBaseModel):
+    """Structured query interpreted from a natural-language question (P7.3)."""
+
+    original_question: str
+    entity: str | None = None
+    attribute: str | None = None
+    context: dict[str, str] = Field(default_factory=dict)
+    intent: QueryIntent = QueryIntent.CURRENT
+    temporal_intent: TemporalIntent = TemporalIntent.CURRENT
+    query_type: QueryType = QueryType.FACT_LOOKUP
+    valid_at: datetime | None = None
+    known_at: datetime | None = None
+    date_str: str | None = None
+    is_historical: bool = False
+    is_why: bool = False
+    is_impact: bool = False
+    confidence: float = 1.0
+    reasoning: str = ""
+
+    def to_query_plan(self) -> QueryPlan:
+        """Convert structured parsed query to an engine QueryPlan."""
+        return QueryPlan(
+            intent=self.intent.value if hasattr(self.intent, "value") else str(self.intent),
+            entity=self.entity,
+            attribute=self.attribute,
+            valid_at=self.valid_at,
+            known_at=self.known_at,
+            context=self.context,
+        )
 
 
 class MemoryView(MeshBaseModel):
@@ -506,6 +567,37 @@ class FinalAnswer(MeshBaseModel):
     abstained: bool = False
     explanation: str = ""
     cited_memory_ids: list[int] = Field(default_factory=list)
+    answer_text: str = ""
+
+
+class ComposedAnswer(MeshBaseModel):
+    """Structured response from the Answer Composer (P7.3)."""
+
+    answer_text: str
+    value: str | None = None
+    values: list[str] = Field(default_factory=list)
+    referenced_memory_ids: list[int] = Field(default_factory=list)
+    explanation: str = ""
+    is_uncertain: bool = False
+    is_complete: bool = True
+    no_relevant_memory: bool = False
+    conflict_flagged: bool = False
+    needs_review_flagged: bool = False
+    abstained: bool = False
+
+    def to_final_answer(self) -> FinalAnswer:
+        """Convert composed answer to the canonical FinalAnswer schema."""
+        exp = self.explanation or self.answer_text
+        return FinalAnswer(
+            value=self.value,
+            values=self.values,
+            conflict_flagged=self.conflict_flagged,
+            needs_review_flagged=self.needs_review_flagged,
+            abstained=self.abstained or self.no_relevant_memory,
+            explanation=exp,
+            cited_memory_ids=self.referenced_memory_ids,
+            answer_text=self.answer_text,
+        )
 
 
 class AskResult(MeshBaseModel):

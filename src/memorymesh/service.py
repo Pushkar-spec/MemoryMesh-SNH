@@ -55,6 +55,7 @@ from memorymesh.models import (
     Action,
     AddEdge,
     AddEvidence,
+    AskResult,
     AttributeDef,
     Cardinality,
     Claim,
@@ -72,6 +73,8 @@ from memorymesh.models import (
     MemoryStatus,
     MemoryView,
     NewEvidence,
+    ParsedQuery,
+    QueryIntent,
     QueryPlan,
     QueryResult,
     RecomputeConfidence,
@@ -1754,6 +1757,255 @@ class MemoryService:
             decisions=decisions,
             edges=edges,
             notes=notes,
+        )
+
+    def parse_query(
+        self,
+        question: str,
+        *,
+        reference_time: datetime | None = None,
+        model: str | None = None,
+    ) -> ParsedQuery:
+        """Parse a natural-language question into a structured query intent (P7.3)."""
+        from memorymesh.llm.query_parser import QueryParser
+
+        known_entities = [c.canonical_name for c in self._build_entity_candidates()]
+        repo_attrs = self.repo.list_attribute_schemas()
+        attributes = repo_attrs if repo_attrs else self.cfg.attributes
+        parser = QueryParser(
+            llm_client=self.llm_client,
+            attributes=attributes,
+            known_entities=known_entities,
+        )
+        ref_time = reference_time or self.clock()
+        return parser.parse(question, reference_time=ref_time, model=model)
+
+    def ask(
+        self,
+        question: str,
+        *,
+        as_of: datetime | None = None,
+        valid_at: datetime | None = None,
+        known_at: datetime | None = None,
+        context: dict[str, str] | None = None,
+        model: str | None = None,
+    ) -> AskResult:
+        """Answer a natural question grounded in retrieved bitemporal memories (P7.3).
+
+        Orchestration flow:
+        1. Parse question using QueryParser into structured ParsedQuery.
+        2. Apply optional explicit parameter overrides (valid_at, as_of, known_at, context).
+        3. Retrieve relevant memories, evidence, disputes, or impact via existing service methods.
+        4. Compose and validate a natural-language answer via AnswerComposer.
+        5. Return grounded AskResult containing the query, retrieval result, and final answer.
+        """
+        from memorymesh.llm.answer_composer import AnswerComposer
+
+        ref_time = self.clock()
+        if ref_time.tzinfo is None or ref_time.utcoffset() is None:
+            ref_time = ref_time.replace(tzinfo=UTC)
+        ref_time = ref_time.astimezone(UTC)
+
+        # 1. Parse question
+        parsed_query = self.parse_query(question, reference_time=ref_time, model=model)
+
+        # Apply optional runtime overrides (valid_at and known_at remain independent)
+        eff_valid_at = valid_at if valid_at is not None else as_of
+        if eff_valid_at is not None:
+            if eff_valid_at.tzinfo is None or eff_valid_at.utcoffset() is None:
+                eff_valid_at = eff_valid_at.replace(tzinfo=UTC)
+            parsed_query.valid_at = eff_valid_at.astimezone(UTC)
+            parsed_query.intent = QueryIntent.AS_OF
+            parsed_query.is_historical = True
+        if known_at is not None:
+            if known_at.tzinfo is None or known_at.utcoffset() is None:
+                known_at = known_at.replace(tzinfo=UTC)
+            parsed_query.known_at = known_at.astimezone(UTC)
+            parsed_query.is_historical = True
+        if context is not None:
+            parsed_query.context = dict(context)
+
+        # 2. Retrieve memories using existing service methods
+        plan = parsed_query.to_query_plan()
+        query_result: QueryResult
+
+        # Infer single entity if omitted from question
+        if not parsed_query.entity:
+            all_entities = self.repo.list_entities()
+            if len(all_entities) == 1:
+                parsed_query.entity = all_entities[0]["canonical_name"]
+
+        # Case B: Entity specified, but no attribute
+        if parsed_query.entity and not parsed_query.attribute:
+            ent = self.repo.get_entity_by_name(parsed_query.entity)
+            if ent is None:
+                ent = self.repo.get_entity_by_alias(normalize_entity_name(parsed_query.entity))
+            if ent is not None:
+                entity_id = int(ent["id"])
+                candidate_mems = self.repo.find_memories(
+                    entity_id=entity_id,
+                    valid_at=parsed_query.valid_at or (parsed_query.known_at or ref_time),
+                    known_at=parsed_query.known_at,
+                    include_rejected=False,
+                )
+                q_lower = question.lower()
+                matching_mem = next(
+                    (
+                        m
+                        for m in candidate_mems
+                        if (m.value_norm and m.value_norm in q_lower)
+                        or (m.value_display and m.value_display.lower() in q_lower)
+                    ),
+                    None,
+                )
+                if matching_mem is not None:
+                    parsed_query.attribute = matching_mem.attribute
+                elif len(candidate_mems) == 1:
+                    parsed_query.attribute = candidate_mems[0].attribute
+
+        # Recompute plan with potentially inferred attribute
+        plan = parsed_query.to_query_plan()
+
+        # Case A: Missing entity
+        if not parsed_query.entity:
+            query_result = QueryResult(
+                plan=plan,
+                items=[],
+                notes=["No target entity could be identified in the question."],
+            )
+        # Case B: Entity specified, but still no attribute
+        elif not parsed_query.attribute:
+            ent = self.repo.get_entity_by_name(parsed_query.entity)
+            if ent is None:
+                ent = self.repo.get_entity_by_alias(normalize_entity_name(parsed_query.entity))
+            if ent is None:
+                query_result = QueryResult(
+                    plan=plan,
+                    items=[],
+                    notes=[f"Entity '{parsed_query.entity}' not found."],
+                )
+            else:
+                entity_id = int(ent["id"])
+                mems = self.repo.find_memories(
+                    entity_id=entity_id,
+                    valid_at=parsed_query.valid_at or (parsed_query.known_at or ref_time),
+                    known_at=parsed_query.known_at,
+                    include_rejected=False,
+                )
+                items = [
+                    self._build_memory_view(m, parsed_query.valid_at or ref_time) for m in mems
+                ]
+                disputes = self.disputes(entity=parsed_query.entity, known_at=parsed_query.known_at)
+                notes = (
+                    []
+                    if items
+                    else [f"No active memories found for entity '{parsed_query.entity}'."]
+                )
+                query_result = QueryResult(
+                    plan=plan,
+                    items=items,
+                    disputes=disputes,
+                    notes=notes,
+                )
+        # Case C: Entity and attribute both specified
+        else:
+            if parsed_query.intent == QueryIntent.WHY:
+                curr_res = self.current(
+                    entity=parsed_query.entity,
+                    attribute=parsed_query.attribute,
+                    context=parsed_query.context,
+                    valid_at=parsed_query.valid_at,
+                    known_at=parsed_query.known_at,
+                    now=ref_time,
+                )
+                if curr_res.items:
+                    query_result = self.explain(curr_res.items[0].memory.id)
+                else:
+                    query_result = curr_res
+            elif parsed_query.intent == QueryIntent.IMPACT:
+                curr_res = self.current(
+                    entity=parsed_query.entity,
+                    attribute=parsed_query.attribute,
+                    context=parsed_query.context,
+                    valid_at=parsed_query.valid_at,
+                    known_at=parsed_query.known_at,
+                    now=ref_time,
+                )
+                if curr_res.items:
+                    m_id = curr_res.items[0].memory.id
+                    impact_items = self.impact(m_id)
+                    query_result = QueryResult(
+                        plan=plan,
+                        items=curr_res.items,
+                        impact=impact_items,
+                    )
+                else:
+                    query_result = curr_res
+            elif parsed_query.intent == QueryIntent.HISTORY:
+                ent = self.repo.get_entity_by_name(parsed_query.entity)
+                if ent is None:
+                    ent = self.repo.get_entity_by_alias(normalize_entity_name(parsed_query.entity))
+                if ent is None:
+                    query_result = QueryResult(
+                        plan=plan,
+                        items=[],
+                        notes=[f"Entity '{parsed_query.entity}' not found."],
+                    )
+                else:
+                    entity_id = int(ent["id"])
+                    all_mems = self.repo.find_memories(
+                        entity_id=entity_id,
+                        attribute=parsed_query.attribute,
+                        include_rejected=False,
+                        known_at=parsed_query.known_at,
+                    )
+                    items = [self._build_memory_view(m, ref_time) for m in all_mems]
+                    notes = (
+                        []
+                        if items
+                        else [f"No history for {parsed_query.entity}.{parsed_query.attribute}."]
+                    )
+                    query_result = QueryResult(
+                        plan=plan,
+                        items=items,
+                        notes=notes,
+                    )
+            elif parsed_query.intent == QueryIntent.CONFLICTS:
+                disputes = self.disputes(entity=parsed_query.entity, known_at=parsed_query.known_at)
+                if parsed_query.attribute:
+                    disputes = [
+                        d for d in disputes if d.a.memory.attribute == parsed_query.attribute
+                    ]
+                notes = [] if disputes else ["No active disputes found."]
+                query_result = QueryResult(
+                    plan=plan,
+                    disputes=disputes,
+                    notes=notes,
+                )
+            else:  # CURRENT or AS_OF
+                query_result = self.current(
+                    entity=parsed_query.entity,
+                    attribute=parsed_query.attribute,
+                    context=parsed_query.context,
+                    valid_at=parsed_query.valid_at,
+                    known_at=parsed_query.known_at,
+                    now=ref_time,
+                )
+
+        # 3. Compose answer
+        composer = AnswerComposer(llm_client=self.llm_client)
+        composed = composer.compose(
+            question=question,
+            query=parsed_query,
+            result=query_result,
+            reference_time=ref_time,
+            model=model,
+        )
+
+        return AskResult(
+            question=question,
+            result=query_result,
+            answer=composed.to_final_answer(),
         )
 
     def check_invariants(self) -> InvariantReport:

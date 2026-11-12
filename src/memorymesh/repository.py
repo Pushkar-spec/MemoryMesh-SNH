@@ -464,7 +464,7 @@ class Repository:
     def find_memories(
         self,
         entity_id: int,
-        attribute: str,
+        attribute: str | None = None,
         *,
         valid_at: datetime | None = None,
         known_at: datetime | None = None,
@@ -477,8 +477,11 @@ class Repository:
                 raise ValueError("known_at must be a timezone-aware datetime.")
             known_at = known_at.astimezone(UTC)
 
-        clauses = ["m.entity_id = ?", "m.attribute = ?"]
-        params: list[Any] = [entity_id, attribute]
+        clauses = ["m.entity_id = ?"]
+        params: list[Any] = [entity_id]
+        if attribute is not None:
+            clauses.append("m.attribute = ?")
+            params.append(attribute)
         known_str = format_datetime_utc(known_at) if known_at is not None else None
 
         if not include_rejected:
@@ -1288,6 +1291,27 @@ class Repository:
             ),
             allowed_values=json.loads(row["allowed_values_json"]),
         )
+
+    def list_attribute_schemas(self) -> list[AttributeDef]:
+        """List all registered attribute schema definitions."""
+        sql = "SELECT * FROM attribute_schema ORDER BY attribute ASC"
+        rows = self.conn.execute(sql).fetchall()
+        result: list[AttributeDef] = []
+        for row in rows:
+            allowed = json.loads(row["allowed_values_json"]) if row["allowed_values_json"] else []
+            result.append(
+                AttributeDef(
+                    attribute=str(row["attribute"]),
+                    description=str(row["description"]),
+                    cardinality=Cardinality(row["cardinality"]),
+                    value_type=ValueType(row["value_type"]),
+                    half_life_days=(
+                        float(row["half_life_days"]) if row["half_life_days"] is not None else None
+                    ),
+                    allowed_values=allowed,
+                )
+            )
+        return result
 
     def get_message_by_hash(
         self, source_id: str, text_hash: str, event_time: datetime
