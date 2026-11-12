@@ -76,6 +76,7 @@ from memorymesh.models import (
     QueryResult,
     RecomputeConfidence,
     Relation,
+    RelationProposal,
     ResolvedClaim,
     Source,
     UpdateMemory,
@@ -91,9 +92,49 @@ from memorymesh.retrieval.retrieve import (
 )
 
 
-def _make_classifier(schema: AttributeDef) -> Callable[[ResolvedClaim, Memory], Relation]:
+def _make_classifier(
+    schema: AttributeDef,
+    llm_client: Any | None = None,
+    text_duplicate_candidate: int = 70,
+) -> Callable[[ResolvedClaim, Memory], Relation]:
     def classify(new_claim: ResolvedClaim, existing_mem: Memory) -> Relation:
-        return classify_claim_memory(new_claim, existing_mem, schema)
+        # 1. Normalize existing memory to handle legacy unnormalized records
+        try:
+            norm_mem = normalize_value(
+                existing_mem.value_norm,
+                schema.value_type,
+                allowed_values=schema.allowed_values,
+            )
+        except NormalizationError:
+            norm_mem = existing_mem.value_norm
+
+        # Exact normalized equality is ALWAYS IDENTICAL deterministically
+        if new_claim.value_norm == norm_mem:
+            return Relation.IDENTICAL
+
+        proposal: RelationProposal | None = None
+        # 2. Orchestration shell queries LLM for text attributes when LLMClient is available
+        if schema.value_type == ValueType.TEXT and llm_client is not None:
+            from memorymesh.llm.classifier import LLMRelationClassifier
+
+            llm_classifier = LLMRelationClassifier(llm_client)
+            result = llm_classifier.classify(
+                claim_val=new_claim.value_norm,
+                mem_val=existing_mem.value_norm,
+                schema=schema,
+                claim_raw_text=new_claim.claim.span or new_claim.value_display,
+                mem_raw_text=existing_mem.raw_text or existing_mem.value_display,
+            )
+            proposal = llm_classifier.resolve_proposal(result)
+
+        # 4. Call the pure, deterministic engine classifier
+        return classify_claim_memory(
+            new_claim,
+            existing_mem,
+            schema,
+            proposal=proposal,
+            text_duplicate_candidate=text_duplicate_candidate,
+        )
 
     return classify
 
@@ -153,6 +194,30 @@ class MemoryService:
         self.cfg = cfg or load_app_config()
         self.llm = llm
         self.clock = clock or (lambda: datetime.now(UTC))
+        self._llm_client_instance: Any = None
+
+    @property
+    def llm_client(self) -> Any:
+        """Obtain or initialize the LLMClient instance associated with this service."""
+        if self.llm is None:
+            return None
+        if self._llm_client_instance is not None:
+            return self._llm_client_instance
+
+        from memorymesh.llm.client import LLMClient
+        from memorymesh.llm.providers import LLMProvider
+
+        if isinstance(self.llm, LLMClient):
+            self._llm_client_instance = self.llm
+        elif isinstance(self.llm, LLMProvider) or (
+            hasattr(self.llm, "complete") and callable(self.llm.complete)
+        ):
+            self._llm_client_instance = LLMClient(
+                provider=self.llm,
+                repo=self.repo,
+                config=self.cfg.engine.llm,
+            )
+        return self._llm_client_instance
 
     def _build_entity_candidates(self) -> list[EntityCandidate]:
         """Build candidate entities from both configuration and database."""
@@ -248,8 +313,33 @@ class MemoryService:
         return entity_id
 
     # =========================================================================
-    # Write: Structured Ingestion
+    # Extraction & Ingestion (P7.2)
     # =========================================================================
+
+    def extract_claims(
+        self,
+        message: IngestMessage,
+        *,
+        model: str | None = None,
+        raise_on_error: bool = False,
+    ) -> list[Claim]:
+        """Extract structured claims from a natural-language message using LLMClient."""
+        if self.llm_client is None:
+            raise ValueError("Cannot extract claims: LLMClient is not configured on MemoryService.")
+
+        from memorymesh.llm.extractor import ClaimExtractor
+
+        known_entities = [c.canonical_name for c in self._build_entity_candidates()]
+        extractor = ClaimExtractor(
+            llm_client=self.llm_client,
+            attributes=self.cfg.attributes,
+            known_entities=known_entities,
+        )
+        return extractor.extract_claims_for_ingest(
+            message,
+            model=model,
+            raise_on_error=raise_on_error,
+        )
 
     def ingest_claims(
         self,
@@ -409,7 +499,11 @@ class MemoryService:
                     include_rejected=False,
                 )
 
-                classify = _make_classifier(attr_def)
+                classify = _make_classifier(
+                    attr_def,
+                    self.llm_client,
+                    text_duplicate_candidate=self.cfg.engine.fuzzy.text_duplicate_candidate,
+                )
 
                 # Resolve dependency targets from claim.depends_on
                 dep_targets: list[int] = []

@@ -6,9 +6,10 @@ Governed by docs/ARCHITECTURE.md Section 7 and AGENTS.md.
 from __future__ import annotations
 
 import os
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 
+@runtime_checkable
 class LLMProvider(Protocol):
     """Protocol defining the standard provider completion interface."""
 

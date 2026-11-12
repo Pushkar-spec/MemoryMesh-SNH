@@ -198,6 +198,12 @@ def resolve(
                     reject_ratio=cfg.thresholds.reject_ratio,
                     is_revert=False,
                 )
+            if rel == Relation.AMBIGUOUS:
+                return _produce_r_skip_ambiguous(
+                    rc=rc,
+                    target=hist[0],
+                    s_new=s_new,
+                )
 
         later = next((m for m in chain if m.valid_from > rc.valid_from), None)
         if later is None:
@@ -243,6 +249,12 @@ def resolve(
                     cfg=cfg,
                     recorded_at=recorded_at,
                 )
+            if rel == Relation.AMBIGUOUS:
+                return _produce_r_skip_ambiguous(
+                    rc=rc,
+                    target=m,
+                    s_new=s_new,
+                )
 
         # Distinct values on multi-valued attributes coexist independently
         return _produce_r_coexist(
@@ -263,6 +275,13 @@ def resolve(
                 s_new=s_new,
                 cfg=cfg,
                 recorded_at=recorded_at,
+            )
+
+        if rel == Relation.AMBIGUOUS:
+            return _produce_r_skip_ambiguous(
+                rc=rc,
+                target=m,
+                s_new=s_new,
             )
 
         if rel == Relation.REFINES:
@@ -1241,5 +1260,24 @@ def _produce_r_retract(
                 },
             )
         ],
+        affected_memory_ids=[target.id],
+    )
+
+
+def _produce_r_skip_ambiguous(
+    rc: ResolvedClaim,
+    target: Memory,
+    s_new: float,
+) -> Decision:
+    """Build an R-SKIP-AMBIGUOUS decision when relation to memory cannot be determined."""
+    return Decision(
+        action=Action.SKIP,
+        rule_id="R-SKIP-AMBIGUOUS",
+        explanation=(
+            f"Skipped claim with value '{rc.value_norm}': relationship to existing memory "
+            f"M{target.id} ('{target.value_norm}') is ambiguous or unverified."
+        ),
+        scores={"s_new": s_new, "extract_confidence": rc.claim.extract_confidence},
+        mutations=[],
         affected_memory_ids=[target.id],
     )

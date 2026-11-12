@@ -65,6 +65,7 @@ def test_enum_members_and_values() -> None:
     assert Relation.CONFLICTS == "conflicts"
     assert Relation.COMPLEMENTARY == "complementary"
     assert Relation.UNRELATED == "unrelated"
+    assert Relation.AMBIGUOUS == "ambiguous"
 
     assert Action.INSERT == "INSERT"
     assert Action.CORROBORATE == "CORROBORATE"

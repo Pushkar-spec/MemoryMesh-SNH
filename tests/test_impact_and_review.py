@@ -793,7 +793,7 @@ def test_impact_reflects_propagation_and_review_state(service: MemoryService) ->
     c_up = Claim(
         subject="Server A",
         attribute="operating_system",
-        value="Ubuntu 24.04",
+        value="Debian 12",
         extract_confidence=1.0,
         valid_from=t2,
         raw_text="OS 24",
@@ -1089,12 +1089,12 @@ def test_impact_chain_longer_than_50_edges(service: MemoryService) -> None:
     for i in range(1, 57):
         msg = IngestMessage(source_id="sysadmin_alice", event_time=t0, text=f"Step {i}")
         claim = Claim(
-            subject=f"Host_{i}",
+            subject=f"srv{i:02d}",
             attribute="operating_system",
             value=f"OS_{i}",
             extract_confidence=0.9,
             valid_from=t0,
-            raw_text=f"Host_{i}",
+            raw_text=f"srv{i:02d}",
         )
         report = service.ingest_claims(msg, [claim])
         m_id = report.decisions[0].memory_id

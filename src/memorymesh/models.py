@@ -83,6 +83,25 @@ class Relation(StrEnum):
     CONFLICTS = "conflicts"  # incompatible values on a single-valued attribute
     COMPLEMENTARY = "complementary"  # both can be true (multi-valued or additive)
     UNRELATED = "unrelated"
+    AMBIGUOUS = "ambiguous"  # relation cannot be determined or verified
+
+
+class RelationProposal(StrEnum):
+    """Relation proposals emitted by the LLM classifier."""
+
+    IDENTICAL = "identical"
+    REFINES = "refines"
+    CONFLICTS = "conflicts"
+    COMPLEMENTARY = "complementary"
+    AMBIGUOUS = "ambiguous"
+
+
+class RelationClassificationResult(MeshBaseModel):
+    """Validated structured output of an LLM relation classification call."""
+
+    relation: RelationProposal
+    confidence: float = Field(ge=0.0, le=1.0)
+    reason: str = Field(default="")
 
 
 class Action(StrEnum):
@@ -165,6 +184,7 @@ class Claim(MeshBaseModel):
     subject: str
     attribute: str
     value: str
+    previous_value: str | None = None  # Explicit previous value if stated (e.g. from X to Y)
     polarity: Polarity = Polarity.ASSERT
     valid_from: datetime | None = None  # None -> message event_time
     valid_to: datetime | None = None  # rare: "was true until March"
@@ -172,6 +192,70 @@ class Claim(MeshBaseModel):
     depends_on: list[AttrRef] = Field(default_factory=list)
     extract_confidence: float = Field(ge=0.0, le=1.0)
     span: str = ""  # exact substring of the message supporting the claim
+
+
+class ExtractedClaim(MeshBaseModel):
+    """Extracted claim candidate produced by the LLM extractor."""
+
+    subject: str = Field(description="Name of the entity the claim is about.")
+    attribute: str = Field(description="Catalog attribute name (snake_case).")
+    value: str = Field(description="Asserted new or current value.")
+    previous_value: str | None = Field(
+        default=None,
+        description="Previous value if explicitly stated in the message (e.g. 'from X to Y').",
+    )
+    polarity: Polarity = Field(
+        default=Polarity.ASSERT,
+        description="Polarity of the claim: 'assert' or 'retract'.",
+    )
+    valid_from: datetime | None = Field(
+        default=None,
+        description="ISO 8601 UTC timestamp when the fact became true in the world, or null.",
+    )
+    valid_to: datetime | None = Field(
+        default=None,
+        description="ISO 8601 UTC timestamp when the fact stopped being true, or null.",
+    )
+    context: dict[str, str] = Field(
+        default_factory=dict,
+        description="Scope qualifiers as key-value pairs (e.g. {'environment': 'staging'}).",
+    )
+    depends_on: list[AttrRef] = Field(
+        default_factory=list,
+        description="References to foundation facts this claim depends on.",
+    )
+    extract_confidence: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="Extraction confidence between 0.0 and 1.0.",
+    )
+    span: str = Field(
+        default="",
+        description="Exact supporting substring from the original message.",
+    )
+
+    def to_claim(self) -> Claim:
+        """Convert this candidate into an engine-compatible domain Claim."""
+        return Claim(
+            subject=self.subject,
+            attribute=self.attribute,
+            value=self.value,
+            previous_value=self.previous_value,
+            polarity=self.polarity,
+            valid_from=self.valid_from,
+            valid_to=self.valid_to,
+            context=dict(self.context),
+            depends_on=list(self.depends_on),
+            extract_confidence=self.extract_confidence,
+            span=self.span,
+        )
+
+
+class ExtractionResult(MeshBaseModel):
+    """Container for claims extracted from a message."""
+
+    claims: list[ExtractedClaim] = Field(default_factory=list)
 
 
 class IngestMessage(MeshBaseModel):

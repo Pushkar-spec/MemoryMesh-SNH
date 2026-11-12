@@ -1,9 +1,11 @@
 """Deterministic relation classifier for MemoryMesh.
 
 Governed by docs/SPECIFICATION.md Section 1.1, docs/ARCHITECTURE.md,
-and docs/ROADMAP_AND_TASKS.md (T2.2).
-Implements canonical task P2.1: deterministic relation classification between a new claim
-and existing memory:
+docs/RESOLUTION_ENGINE.md Section 3, and
+MEMORYMESH_MASTER_IMPLEMENTATION_PLAN_CANONICAL.md (P2.1, P7.2).
+
+Pure functional core: zero I/O, zero network, zero LLM provider dependencies.
+Classifies the relation between a new claim value and existing memory value:
   - IDENTICAL: Same normalized value, or less-specific compatible version (e.g. 3 vs 3.12).
   - REFINES: More-specific compatible version (e.g. 3.12.4 vs 3.12).
   - CONFLICTS: Incompatible values on single-valued attributes.
@@ -13,9 +15,19 @@ and existing memory:
 
 from __future__ import annotations
 
+from rapidfuzz import fuzz
+
 from memorymesh.engine.normalize import normalize_value
 from memorymesh.errors import NormalizationError
-from memorymesh.models import AttributeDef, Cardinality, Memory, Relation, ResolvedClaim, ValueType
+from memorymesh.models import (
+    AttributeDef,
+    Cardinality,
+    Memory,
+    Relation,
+    RelationProposal,
+    ResolvedClaim,
+    ValueType,
+)
 
 
 def _classify_version_relation(
@@ -58,11 +70,17 @@ def classify_relation(
     claim_val: str,
     mem_val: str,
     schema: AttributeDef,
+    proposal: RelationProposal | None = None,
+    *,
+    text_duplicate_candidate: int = 70,
 ) -> Relation:
-    """Classify deterministic relation between claim value and existing memory.
+    """Classify relation between claim value and existing memory.
 
+    Pure, deterministic function with zero I/O or provider dependencies.
     Normalizes both claim and memory values using the attribute's ValueType and
     allowed_values to properly handle legacy, unnormalized existing memories.
+    If a validated relation proposal is provided by the orchestration layer,
+    applies strict deterministic cardinality and invariant guards.
     """
     try:
         norm_claim = normalize_value(
@@ -82,19 +100,64 @@ def classify_relation(
     except NormalizationError:
         norm_mem = mem_val
 
-    # 1. Exact normalized value equality is always IDENTICAL
+    # 1. Exact normalized value equality is ALWAYS IDENTICAL (deterministic invariant)
     if norm_claim == norm_mem:
         return Relation.IDENTICAL
 
-    # 2. Version-specific relation rules
+    # 2. Version-specific relation rules (pure deterministic)
     if schema.value_type == ValueType.VERSION:
         return _classify_version_relation(norm_claim, norm_mem, schema.cardinality)
 
-    # 3. For single-valued attributes, differing values represent a conflict
+    # 3. Text attributes: deterministic fuzzy matching vs LLM proposal
+    if schema.value_type == ValueType.TEXT:
+        ratio = fuzz.ratio(norm_claim, norm_mem)
+        # Clearly different strings below duplicate threshold are deterministically classifiable
+        if ratio < text_duplicate_candidate:
+            return (
+                Relation.CONFLICTS
+                if schema.cardinality == Cardinality.SINGLE
+                else Relation.COMPLEMENTARY
+            )
+
+        # Strings meeting or exceeding threshold are duplicate/similarity candidates
+        if proposal is not None and proposal != RelationProposal.AMBIGUOUS:
+            if proposal == RelationProposal.IDENTICAL:
+                return Relation.IDENTICAL
+            if proposal == RelationProposal.REFINES:
+                return Relation.REFINES
+            if proposal == RelationProposal.CONFLICTS:
+                if schema.cardinality == Cardinality.SINGLE:
+                    return Relation.CONFLICTS
+                return Relation.COMPLEMENTARY
+            if proposal == RelationProposal.COMPLEMENTARY:
+                if schema.cardinality == Cardinality.SINGLE:
+                    return Relation.CONFLICTS
+                return Relation.COMPLEMENTARY
+
+        # Unresolved similar strings without a decisive LLM proposal are AMBIGUOUS
+        return Relation.AMBIGUOUS
+
+    # 4. If a validated relation proposal is provided for other types
+    if proposal is not None:
+        if proposal == RelationProposal.AMBIGUOUS:
+            return Relation.AMBIGUOUS
+        if proposal == RelationProposal.IDENTICAL:
+            return Relation.IDENTICAL
+        if proposal == RelationProposal.REFINES:
+            return Relation.REFINES
+        if proposal == RelationProposal.CONFLICTS:
+            if schema.cardinality == Cardinality.SINGLE:
+                return Relation.CONFLICTS
+            return Relation.COMPLEMENTARY
+        if proposal == RelationProposal.COMPLEMENTARY:
+            if schema.cardinality == Cardinality.SINGLE:
+                return Relation.CONFLICTS
+            return Relation.COMPLEMENTARY
+
+    # 5. Pure deterministic classification based on schema cardinality (ENUM, NUMBER, DATE)
     if schema.cardinality == Cardinality.SINGLE:
         return Relation.CONFLICTS
 
-    # 4. For multi-valued attributes, differing values coexist (complementary)
     return Relation.COMPLEMENTARY
 
 
@@ -102,9 +165,18 @@ def classify_claim_memory(
     claim: ResolvedClaim,
     memory: Memory,
     schema: AttributeDef,
+    proposal: RelationProposal | None = None,
+    *,
+    text_duplicate_candidate: int = 70,
 ) -> Relation:
     """Classify relation between a ResolvedClaim and an existing Memory record."""
     if claim.entity_id != memory.entity_id or claim.attribute != memory.attribute:
         return Relation.UNRELATED
 
-    return classify_relation(claim.value_norm, memory.value_norm, schema)
+    return classify_relation(
+        claim.value_norm,
+        memory.value_norm,
+        schema,
+        proposal=proposal,
+        text_duplicate_candidate=text_duplicate_candidate,
+    )

@@ -64,9 +64,9 @@ Compares a new claim with one existing memory in the same chain.
 | `version` | new starts with `old + "."` -> `REFINES` (e.g. `3.12.4` vs `3.12`) |
 | `version` | old starts with `new + "."` -> `IDENTICAL` (new is less specific but compatible) |
 | `version`, `enum`, `number`, `date` | otherwise single-valued -> `CONFLICTS`; multi-valued -> `COMPLEMENTARY` |
-| `text`, single-valued | fuzzy ratio < `text_duplicate_candidate` -> `CONFLICTS`; else ask LLM (`classify_relation`) |
-| `text`, multi-valued | fuzzy ratio < `text_duplicate_candidate` -> `COMPLEMENTARY`; else ask LLM |
-| `text`, LLM unavailable | single -> `CONFLICTS`; multi -> `COMPLEMENTARY` (explanation notes this) |
+| `text`, single-valued | fuzzy ratio < `text_duplicate_candidate` -> `CONFLICTS`; fuzzy ratio >= `text_duplicate_candidate` -> candidate duplicate (LLM-assisted relation classification) |
+| `text`, multi-valued | fuzzy ratio < `text_duplicate_candidate` -> `COMPLEMENTARY`; fuzzy ratio >= `text_duplicate_candidate` -> candidate duplicate (LLM-assisted relation classification) |
+| `text`, candidate duplicate (`ratio >= text_duplicate_candidate`) | with LLM: apply validated proposal (`IDENTICAL`, `REFINES`, `CONFLICTS`, `COMPLEMENTARY`) respecting cardinality invariants; if LLM returns `AMBIGUOUS`, provider fails, or no LLM is configured -> `Relation.AMBIGUOUS` (yields non-mutating `R-SKIP-AMBIGUOUS`). Semantic relationships are never inferred solely from cardinality for candidate duplicates. |
 
 Context is **not** compared here. Different contexts never meet, because chains are keyed by `context_key`.
 

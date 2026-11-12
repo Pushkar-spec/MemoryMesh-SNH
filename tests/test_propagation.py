@@ -714,7 +714,7 @@ def test_propagation_transitive_dependents_included(service: MemoryService) -> N
     c_up = Claim(
         subject="Server A",
         attribute="operating_system",
-        value="Ubuntu 24.04",
+        value="Debian 12",
         extract_confidence=1.0,
         valid_from=t2,
         raw_text="OS Upgrade",
@@ -1711,7 +1711,7 @@ def test_propagation_preserves_path_and_trigger_info(service: MemoryService) -> 
     c_up = Claim(
         subject="Server A",
         attribute="operating_system",
-        value="Ubuntu 24.04",
+        value="Debian 12",
         extract_confidence=1.0,
         valid_from=t2,
         raw_text="OS 24",

@@ -165,6 +165,55 @@ def test_text_classification_multi_valued() -> None:
     assert classify_relation("auth-api", "auth-api", schema) == Relation.IDENTICAL
 
 
+def test_text_classification_fuzzy_thresholds_without_llm() -> None:
+    """Deterministic TEXT classification using text_duplicate_candidate threshold (70)."""
+    single_schema = make_schema("os_release", Cardinality.SINGLE, ValueType.TEXT)
+    multi_schema = make_schema("runs_service", Cardinality.MULTI, ValueType.TEXT)
+
+    # 1. Exact normalized match -> IDENTICAL
+    assert classify_relation("Ubuntu 24.04", "ubuntu 24.04", single_schema) == Relation.IDENTICAL
+    assert classify_relation("  auth-api  ", "auth-api", multi_schema) == Relation.IDENTICAL
+
+    # 2. Clearly similar strings (ratio >= 70) without LLM -> AMBIGUOUS
+    # "python 3.10" vs "python 3.12" has ratio 90.9% >= 70
+    assert classify_relation("python 3.10", "python 3.12", single_schema) == Relation.AMBIGUOUS
+    assert classify_relation("python 3.10", "python 3.12", multi_schema) == Relation.AMBIGUOUS
+
+    # 3. Clearly different strings (ratio < 70) without LLM -> CONFLICTS / COMPLEMENTARY
+    # "ubuntu 24.04" vs "debian 12" has ratio 38.1% < 70
+    assert classify_relation("ubuntu 24.04", "debian 12", single_schema) == Relation.CONFLICTS
+    # "auth-api" vs "web-gateway" has ratio 31.6% < 70
+    assert classify_relation("auth-api", "web-gateway", multi_schema) == Relation.COMPLEMENTARY
+
+
+def test_text_classification_boundary_behavior() -> None:
+    """Boundary behavior exactly around the configured text_duplicate_candidate threshold (70)."""
+    single_schema = make_schema("runtime_str", Cardinality.SINGLE, ValueType.TEXT)
+    multi_schema = make_schema("runtime_str", Cardinality.MULTI, ValueType.TEXT)
+
+    # Pair with ratio 69.23% (below threshold of 70)
+    str_below_1 = "1234567890123"
+    str_below_2 = "123456789xxxx"
+    assert classify_relation(str_below_1, str_below_2, single_schema) == Relation.CONFLICTS
+    assert classify_relation(str_below_1, str_below_2, multi_schema) == Relation.COMPLEMENTARY
+
+    # Pair with ratio 70.0% (at threshold of 70)
+    str_at_1 = "abcdefghij"
+    str_at_2 = "abcdefgxyz"
+    assert classify_relation(str_at_1, str_at_2, single_schema) == Relation.AMBIGUOUS
+    assert classify_relation(str_at_1, str_at_2, multi_schema) == Relation.AMBIGUOUS
+
+    # Custom threshold: e.g. text_duplicate_candidate=80
+    assert (
+        classify_relation("abcdefghij", "abcdefgh123", single_schema, text_duplicate_candidate=80)
+        == Relation.CONFLICTS
+    )
+    assert (
+        classify_relation("abcdefghij", "abcdefgh123", single_schema, text_duplicate_candidate=70)
+        == Relation.AMBIGUOUS
+    )
+
+
 # =============================================================================
 # classify_claim_memory & UNRELATED Tests
 # =============================================================================
