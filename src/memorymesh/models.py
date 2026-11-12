@@ -111,6 +111,15 @@ class EdgeType(StrEnum):
     DEPENDS_ON = "depends_on"
 
 
+class LLMCallStatus(StrEnum):
+    """Execution status of an LLM call recorded in llm_calls."""
+
+    SUCCESS = "success"
+    RETRY = "retry"
+    ERROR = "error"
+    CACHE_HIT = "cache_hit"
+
+
 # ==============================================================================
 # Catalog & Configuration Objects
 # ==============================================================================
@@ -453,3 +462,19 @@ class InvariantReport(MeshBaseModel):
     is_valid: bool
     total_checked: int = 0
     violations: list[InvariantViolation] = Field(default_factory=list)
+
+
+class LLMCall(MeshBaseModel):
+    """Record of an LLM provider invocation for auditing and latency tracking."""
+
+    id: str
+    timestamp: datetime
+    prompt_id: str
+    provider: str
+    model: str
+    prompt_summary: str
+    response_raw: str
+    parsed_json: str | None = None
+    latency_ms: float
+    status: LLMCallStatus
+    error: str | None = None

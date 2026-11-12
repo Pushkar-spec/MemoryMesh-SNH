@@ -58,7 +58,7 @@ def run_smoke_test() -> int:
         print(f"[ERROR] Failed to load engine configuration: {exc}", file=sys.stderr)
         return 1
 
-    provider_name = config.llm.provider.value
+    provider_name = os.environ.get("LLM_PROVIDER") or config.llm.provider.value
     model_name = resolve_model_name(provider_name, config.llm.fast_model)
 
     print(f"Running LLM smoke test with provider '{provider_name}' (model: {model_name})...")

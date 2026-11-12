@@ -173,24 +173,76 @@ Impact analysis = `networkx.ancestors(G_depends, changed_node)` on the subgraph 
 
 ---
 
-## 7. LLM Wrapper
+## 7. LLM Wrapper and Client Infrastructure (P7.1)
 
 ```mermaid
-flowchart LR
-    Task["Caller (extractor / classifier / parser / composer)"] --> Sem["Semaphore(3)"]
-    Sem --> Cache{"Cache: SHA-256(provider, model, system, user)"}
-    Cache -- Hit --> Ret["Return cached parsed result"]
-    Cache -- Miss --> Prov["Provider adapter (anthropic / gemini / fake)"]
-    Prov --> Parse["Extract JSON -> Pydantic validate"]
-    Parse -- Fail --> Retry["Retry once with repair directive"]
-    Retry --> Parse
-    Parse -- OK --> Log["Write llm_calls row"]
-    Log --> Store["Store in cache"]
+flowchart TD
+    Task["Caller (extractor / classifier / parser / composer)"] --> Cache{"Cache lookup: SHA-256(provider, model, system, user, schema, max_tokens)"}
+    Cache -- Hit --> Ret["Return cached validated model copy"]
+    Cache -- Miss --> Sem["Acquire Semaphore(concurrency)"]
+    Sem --> Prov["Provider complete() (Anthropic / Gemini / Fake)"]
+    Prov --> Release["Release Semaphore"]
+    Release --> Parse["Extract JSON & Pydantic validate"]
+    Parse -- OK --> LogSuccess["Write llm_calls row (status=success)"]
+    LogSuccess --> Store["Store in process-local cache"]
     Store --> Ret
+    Parse -- Fail --> LogRetry["Write llm_calls row (status=retry)"]
+    LogRetry --> Repair["Construct repair directive with schema & error details"]
+    Repair --> SemRetry["Acquire Semaphore(concurrency)"]
+    SemRetry --> ProvRetry["Provider complete() repair call"]
+    ProvRetry --> ReleaseRetry["Release Semaphore"]
+    ReleaseRetry --> ParseRetry["Extract JSON & Pydantic validate"]
+    ParseRetry -- OK --> LogSuccessRetry["Write llm_calls row (status=success)"]
+    LogSuccessRetry --> Store
+    ParseRetry -- Fail --> LogError["Write llm_calls row (status=error)"]
+    LogError --> RaiseError["Raise LLMOutputError"]
 ```
 
-- Providers implement `complete(system, user, *, model, max_tokens) -> str`.
-- `FakeProvider` returns scripted responses keyed by prompt ID and message text, so tests and CI are offline and deterministic.
+### Core Components
+
+1. **`LLMClient.complete_json()`**:
+   - Centralized, typed API accepting `prompt_id`, `system`, `user`, `response_model: type[T]`, `model`, `max_tokens`.
+   - Returns a validated Pydantic model instance `T`.
+   - Agnostic to underlying providers via the `LLMProvider` protocol (`complete(system, user, *, model, max_tokens) -> str`).
+
+2. **JSON Extraction and Validation (`extract_json_payload`)**:
+   - Supports plain JSON objects/arrays, surrounding whitespace, and Markdown fences (```` ```json ```` or ```` ``` ````).
+   - Handles nested structures cleanly via bracket depth tracking without fragile regular expression truncation.
+   - Validates extracted dictionaries strictly against caller-supplied Pydantic models.
+
+3. **Exactly One Retry with Repair Directive**:
+   - Triggered when provider output fails JSON extraction or Pydantic validation.
+   - Initial call is logged with `status="retry"`.
+   - Sends a targeted repair directive containing the validation error details and schema specification.
+   - If the repair attempt fails again, logs `status="error"` and raises `LLMOutputError`. Indefinite retries are prevented.
+
+4. **Deterministic SHA-256 Cache**:
+   - Keyed on `SHA-256(provider, model, system, user, schema_json, max_tokens)`.
+   - In-memory, process-local storage (`dict[str, BaseModel]`) protected by a thread lock. Resets on process restart.
+   - Cache hits return a deep copy of the validated model without acquiring concurrency slots or logging calls.
+   - Failed responses are never cached.
+
+5. **Concurrency Control**:
+   - Enforced synchronously via `threading.Semaphore` with configurable limits (`concurrency`, default 3).
+   - Concurrency slots are acquired strictly during provider completions and released immediately in a `try...finally` block.
+   - Cache hits bypass semaphore acquisition entirely.
+
+6. **Audit Logging (`llm_calls` Table) and Sensitive Data Sanitization**:
+   - Every physical provider invocation (initial and repair) is recorded in SQLite via `Repository.insert_llm_call()`.
+   - Logs timestamp, prompt ID, provider, model, sanitized prompt summary, raw response, parsed JSON, latency (ms), status (`success`, `retry`, `error`), and error details.
+   - Sensitive credentials (API keys, bearer tokens, passwords, private keys, authorization headers) are automatically sanitized and redacted across all logged fields and error diagnostics.
+   - Persisted diagnostic information is strictly bounded (`prompt_summary` <= 120 chars, `response_raw` <= 1000 chars, `parsed_json` <= 1000 chars, `error` <= 500 chars).
+   - `LLMOutputError` automatically sanitizes `raw_response` and `details` to ensure credentials are never leaked to callers or application logs.
+   - **Provider Exception Security Note**: When an external provider raises a transport or network exception, `LLMClient` re-raises the original provider exception unchanged to preserve provider exception contracts and avoid conflating transport failures with output errors. The persisted database record in `llm_calls.error` is sanitized and redacted, but the caller-facing exception object itself retains whatever exception string the external provider created.
+
+7. **Offline Testing with `FakeProvider`**:
+   - Tests execute with zero network access and deterministic responses using `FakeProvider` or `SequenceProvider`.
+   - Offline verification:
+     ```bash
+     export LLM_PROVIDER=fake
+     make smoke
+     pytest tests/test_llm_client.py
+     ```
 
 ---
 

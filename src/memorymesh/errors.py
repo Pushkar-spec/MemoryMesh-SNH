@@ -56,3 +56,25 @@ class ConflictResolutionError(EngineError, ValueError):
 
 class UnsupportedRelationError(ConflictResolutionError, NotImplementedError):
     """Raised when a claim-memory relation (e.g., IDENTICAL) is not supported in Phase 1."""
+
+
+class LLMError(MemoryMeshError):
+    """Base exception for LLM operations."""
+
+
+class LLMOutputError(LLMError):
+    """Raised when LLM output remains invalid after a repair retry attempt."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        raw_response: str = "",
+        details: str = "",
+    ) -> None:
+        from memorymesh.llm.client import sanitize_sensitive_text
+
+        sanitized_msg = sanitize_sensitive_text(message, max_len=500)
+        super().__init__(sanitized_msg)
+        self.raw_response = sanitize_sensitive_text(raw_response, max_len=1000)
+        self.details = sanitize_sensitive_text(details, max_len=500)

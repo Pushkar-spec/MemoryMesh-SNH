@@ -30,6 +30,8 @@ from memorymesh.models import (
     Edge,
     EdgeType,
     Evidence,
+    LLMCall,
+    LLMCallStatus,
     Memory,
     MemoryStatus,
     NewEvidence,
@@ -1903,3 +1905,79 @@ class Repository:
             row = cursor.fetchone()
             counts[tbl] = int(row["c"]) if row else 0
         return counts
+
+    # =========================================================================
+    # LLM Call Logging Operations (P7.1)
+    # =========================================================================
+
+    def _row_to_llm_call(self, r: sqlite3.Row) -> LLMCall:
+        """Convert a SQLite row to an LLMCall model."""
+        return LLMCall(
+            id=str(r["id"]),
+            timestamp=parse_db_datetime(r["timestamp"]),  # type: ignore[arg-type]
+            prompt_id=str(r["prompt_id"]),
+            provider=str(r["provider"]),
+            model=str(r["model"]),
+            prompt_summary=str(r["prompt_summary"]),
+            response_raw=str(r["response_raw"]),
+            parsed_json=str(r["parsed_json"]) if r["parsed_json"] is not None else None,
+            latency_ms=float(r["latency_ms"]),
+            status=LLMCallStatus(r["status"]),
+            error=str(r["error"]) if r["error"] is not None else None,
+        )
+
+    def insert_llm_call(self, call: LLMCall) -> str:
+        """Insert a record into the llm_calls table."""
+        sql = """
+        INSERT INTO llm_calls (
+            id, timestamp, prompt_id, provider, model,
+            prompt_summary, response_raw, parsed_json, latency_ms, status, error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        params = (
+            call.id,
+            format_datetime_utc(call.timestamp),
+            call.prompt_id,
+            call.provider,
+            call.model,
+            call.prompt_summary,
+            call.response_raw,
+            call.parsed_json,
+            call.latency_ms,
+            call.status.value,
+            call.error,
+        )
+        self.conn.execute(sql, params)
+        return call.id
+
+    def get_llm_call(self, call_id: str) -> LLMCall | None:
+        """Retrieve an LLM call record by its ID."""
+        sql = "SELECT * FROM llm_calls WHERE id = ?"
+        row = self.conn.execute(sql, (call_id,)).fetchone()
+        return self._row_to_llm_call(row) if row else None
+
+    def get_llm_calls(
+        self,
+        prompt_id: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[LLMCall]:
+        """Retrieve logged LLM calls, optionally filtered by prompt_id."""
+        conditions: list[str] = []
+        params: list[Any] = []
+        if prompt_id is not None:
+            conditions.append("prompt_id = ?")
+            params.append(prompt_id)
+
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = f"SELECT * FROM llm_calls {where_clause} ORDER BY timestamp ASC, rowid ASC"
+
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+        elif offset > 0:
+            sql += " LIMIT -1 OFFSET ?"
+            params.append(offset)
+
+        rows = self.conn.execute(sql, params).fetchall()
+        return [self._row_to_llm_call(r) for r in rows]
