@@ -333,15 +333,123 @@ class MemoryService:
         from memorymesh.llm.extractor import ClaimExtractor
 
         known_entities = [c.canonical_name for c in self._build_entity_candidates()]
+        repo_attrs = self.repo.list_attribute_schemas()
+        attributes = repo_attrs if repo_attrs else self.cfg.attributes
         extractor = ClaimExtractor(
             llm_client=self.llm_client,
-            attributes=self.cfg.attributes,
+            attributes=attributes,
             known_entities=known_entities,
         )
         return extractor.extract_claims_for_ingest(
             message,
             model=model,
             raise_on_error=raise_on_error,
+        )
+
+    def ingest(
+        self,
+        message: IngestMessage,
+        *,
+        recorded_at: datetime | None = None,
+        model: str | None = None,
+        raise_on_error: bool = False,
+    ) -> IngestReport:
+        """Ingest a natural-language message end-to-end (P7.4).
+
+        Flow:
+        1. Check message deduplication; if identical (source_id, text_hash, event_time)
+           has already been ingested, return an idempotent duplicate report.
+        2. Validate source exists or can be registered from configuration catalog.
+        3. Extract structured claims candidates using ClaimExtractor via LLMClient.
+        4. Validate claims and pass them to deterministic ingest_claims(), which handles
+           entity resolution, attribute definition check, normalization, relation
+           classification, engine rules, atomic transaction, and decision logging.
+        """
+        eff_recorded_at = recorded_at or message.event_time
+
+        # 1. Early idempotency check (avoids redundant LLM extraction for duplicate messages)
+        text_hash = hashlib.sha256(message.text.encode("utf-8")).hexdigest()
+        existing_msg_id = self.repo.get_message_by_hash(
+            message.source_id, text_hash, message.event_time
+        )
+        if existing_msg_id is not None:
+            return IngestReport(
+                message_id=existing_msg_id,
+                duplicate=True,
+                claims_extracted=0,
+                decisions=[],
+            )
+
+        # 2. Source pre-validation (fail fast on unknown source)
+        source = self.repo.get_source(message.source_id)
+        if source is None:
+            source_cfg = self.cfg.get_source(message.source_id)
+            if source_cfg is None:
+                raise UnknownSourceError(
+                    f"Unknown source '{message.source_id}'. Please configure it in sources.yaml."
+                )
+
+        # 3. LLM-assisted claim extraction
+        if self.llm_client is None:
+            if raise_on_error:
+                raise ValueError(
+                    "Cannot extract claims: LLMClient is not configured on MemoryService."
+                )
+            return IngestReport(
+                message_id=0,
+                duplicate=False,
+                claims_extracted=0,
+                decisions=[],
+                success=False,
+                error="Extraction failed: LLMClient is not configured on MemoryService.",
+            )
+
+        from memorymesh.llm.extractor import ClaimExtractor
+
+        known_entities = [c.canonical_name for c in self._build_entity_candidates()]
+        repo_attrs = self.repo.list_attribute_schemas()
+        attributes = repo_attrs if repo_attrs else self.cfg.attributes
+        extractor = ClaimExtractor(
+            llm_client=self.llm_client,
+            attributes=attributes,
+            known_entities=known_entities,
+        )
+
+        try:
+            extraction_result = extractor.extract(
+                message,
+                model=model,
+                raise_on_error=raise_on_error,
+            )
+        except Exception as exc:
+            if raise_on_error:
+                raise
+            return IngestReport(
+                message_id=0,
+                duplicate=False,
+                claims_extracted=0,
+                decisions=[],
+                success=False,
+                error=f"Extraction failed: {exc}",
+            )
+
+        if extraction_result.error is not None:
+            return IngestReport(
+                message_id=0,
+                duplicate=False,
+                claims_extracted=0,
+                decisions=[],
+                success=False,
+                error=f"Extraction failed: {extraction_result.error}",
+            )
+
+        claims = extractor.to_domain_claims(extraction_result, message=message)
+
+        # 4. Ingest through deterministic engine
+        return self.ingest_claims(
+            message,
+            claims,
+            recorded_at=eff_recorded_at,
         )
 
     def ingest_claims(
@@ -1788,6 +1896,8 @@ class MemoryService:
         valid_at: datetime | None = None,
         known_at: datetime | None = None,
         context: dict[str, str] | None = None,
+        reference_time: datetime | None = None,
+        now: datetime | None = None,
         model: str | None = None,
     ) -> AskResult:
         """Answer a natural question grounded in retrieved bitemporal memories (P7.3).
@@ -1801,7 +1911,7 @@ class MemoryService:
         """
         from memorymesh.llm.answer_composer import AnswerComposer
 
-        ref_time = self.clock()
+        ref_time = reference_time or now or self.clock()
         if ref_time.tzinfo is None or ref_time.utcoffset() is None:
             ref_time = ref_time.replace(tzinfo=UTC)
         ref_time = ref_time.astimezone(UTC)
@@ -1934,6 +2044,13 @@ class MemoryService:
                 if curr_res.items:
                     m_id = curr_res.items[0].memory.id
                     impact_items = self.impact(m_id)
+                    if not impact_items:
+                        # Check if m_id superseded an ancestor whose dependents were impacted
+                        edges = self.repo.get_edges_for_memory(m_id, direction="outgoing")
+                        for edge in edges:
+                            if edge.type == EdgeType.SUPERSEDES:
+                                ancestor_impact = self.impact(edge.dst_memory_id)
+                                impact_items.extend(ancestor_impact)
                     query_result = QueryResult(
                         plan=plan,
                         items=curr_res.items,

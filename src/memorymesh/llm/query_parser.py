@@ -100,6 +100,9 @@ class QueryParser:
                 self._attr_lookup["os"] = canonical
             elif canonical == "python_version":
                 self._attr_lookup["python"] = canonical
+            elif canonical == "deploy_day":
+                self._attr_lookup["deploy"] = canonical
+                self._attr_lookup["deploys"] = canonical
             if hasattr(a, "aliases") and a.aliases:
                 for alias in a.aliases:
                     self._attr_lookup[alias.strip().lower()] = canonical
@@ -198,6 +201,18 @@ class QueryParser:
             except Exception:
                 pass
 
+        # 5. Standalone month: [in / during / as of] Month [Year]
+        nat_pattern3 = rf"\b(?:in\s+|during\s+|as\s+of\s+)?({mon_names})[a-z]*(?:\s+(\d{{4}}))?\b"
+        m3 = re.search(nat_pattern3, cleaned, re.IGNORECASE)
+        if m3:
+            try:
+                mon_str = m3.group(1).lower()
+                mon = MONTH_LOOKUP[mon_str]
+                yr = int(m3.group(2)) if m3.group(2) else default_year
+                return datetime(yr, mon, 15, 0, 0, 0, tzinfo=UTC), m3.group(0).strip()
+            except Exception:
+                pass
+
         return None, None
 
     def _parse_iso_date(self, date_str: str | None) -> datetime | None:
@@ -249,6 +264,20 @@ class QueryParser:
                 yr = int(m.group(3)) if m.group(3) else default_year
                 dt = datetime(yr, mon, day, 0, 0, 0, tzinfo=UTC)
                 found_dates.append((m.start(), m.end(), dt, m.group(0)))
+            except Exception:
+                pass
+
+        # 4. Standalone month: [in / during / as of] Month [Year]
+        nat_pattern3 = rf"\b(?:in\s+|during\s+|as\s+of\s+)?({mon_names})[a-z]*(?:\s+(\d{{4}}))?\b"
+        for m in re.finditer(nat_pattern3, question, re.IGNORECASE):
+            # Skip if this overlaps with any already identified date span
+            if any(m.start() < end and m.end() > start for start, end, _, _ in found_dates):
+                continue
+            try:
+                mon = MONTH_LOOKUP[m.group(1).lower()]
+                yr = int(m.group(2)) if m.group(2) else default_year
+                dt = datetime(yr, mon, 15, 0, 0, 0, tzinfo=UTC)
+                found_dates.append((m.start(), m.end(), dt, m.group(0).strip()))
             except Exception:
                 pass
 
@@ -322,14 +351,17 @@ class QueryParser:
             intent = QueryIntent.WHY
             query_type = QueryType.EXPLANATION
             is_why = True
-        elif any(w in q_lower for w in ("depend", "impact", "blast radius", "affected")):
+        elif any(w in q_lower for w in ("depend", "impact", "blast radius", "affected", "break")):
             intent = QueryIntent.IMPACT
             query_type = QueryType.DEPENDENCY_IMPACT
             is_impact = True
         elif any(w in q_lower for w in ("dispute", "conflict", "contradict")):
             intent = QueryIntent.CONFLICTS
             query_type = QueryType.DISPUTE_CHECK
-        elif any(w in q_lower for w in ("history", "timeline", "past", "previously", "previous")):
+        elif any(
+            w in q_lower
+            for w in ("history", "timeline", "past", "previously", "previous", "had", "versions")
+        ):
             intent = QueryIntent.HISTORY
             query_type = QueryType.TIMELINE_HISTORY
             temporal_intent = TemporalIntent.HISTORY
@@ -348,6 +380,10 @@ class QueryParser:
             if ent.lower() in q_lower:
                 matched_entity = ent
                 break
+        if matched_entity is None:
+            m_ent = re.search(r"\b(server\s+[a-z0-9_-]+)\b", question, re.IGNORECASE)
+            if m_ent:
+                matched_entity = m_ent.group(1).title()
 
         # 4. Match attribute
         matched_attr: str | None = None

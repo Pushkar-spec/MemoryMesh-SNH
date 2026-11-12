@@ -256,6 +256,7 @@ class ExtractionResult(MeshBaseModel):
     """Container for claims extracted from a message."""
 
     claims: list[ExtractedClaim] = Field(default_factory=list)
+    error: str | None = None
 
 
 class IngestMessage(MeshBaseModel):
@@ -615,6 +616,8 @@ class IngestReport(MeshBaseModel):
     duplicate: bool = False
     claims_extracted: int
     decisions: list[DecisionLogEntry] = Field(default_factory=list)
+    success: bool = True
+    error: str | None = None
 
 
 class InvariantViolation(MeshBaseModel):

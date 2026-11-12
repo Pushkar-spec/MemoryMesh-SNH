@@ -16,6 +16,7 @@ from memorymesh.llm.client import LLMClient
 from memorymesh.llm.prompts import build_compose_answer_prompt
 from memorymesh.models import (
     ComposedAnswer,
+    DecisionLogEntry,
     MemoryView,
     MeshBaseModel,
     ParsedQuery,
@@ -83,9 +84,19 @@ class AnswerComposer:
                     allowed.add(m.value_display.strip().lower())
                 if m.value_norm:
                     allowed.add(m.value_norm.strip().lower())
+        for imp in result.impact:
+            m = imp.memory.memory
+            if m.value_display:
+                allowed.add(m.value_display.strip().lower())
+            if m.value_norm:
+                allowed.add(m.value_norm.strip().lower())
         return allowed
 
-    def _build_single_memory_explanation(self, item: MemoryView) -> str:
+    def _build_single_memory_explanation(
+        self,
+        item: MemoryView,
+        decisions: list[DecisionLogEntry] | None = None,
+    ) -> str:
         """Construct a safe, deterministic explanation strictly from structured provenance fields.
 
         Governed by P7.3: Explanations must be constructed using structured provenance fields.
@@ -106,6 +117,11 @@ class AnswerComposer:
             parts.append(f"Reported by {source}.")
         elif conf is not None and conf > 0.0:
             parts.append(f"Confidence {conf:.2f}.")
+
+        if decisions:
+            dec = decisions[0]
+            if dec.rule_id:
+                parts.append(f"Resolved via {dec.rule_id}.")
 
         if m.needs_review:
             parts.append("This memory is flagged for review.")
@@ -149,7 +165,46 @@ class AnswerComposer:
                 conflict_flagged=True,
             )
 
-        # 3. Empty results (no memories found)
+        # 3. Impact analysis
+        intent_val = query.intent.value if hasattr(query.intent, "value") else str(query.intent)
+        if intent_val == "impact" or query.is_impact or result.impact:
+            if not result.impact:
+                return ComposedAnswer(
+                    answer_text="No downstream dependencies or impacted memories found.",
+                    explanation="Impact analysis identified no downstream dependents.",
+                    referenced_memory_ids=[it.memory.id for it in result.items],
+                    is_complete=True,
+                )
+            dep_summaries = [
+                f"{imp.memory.memory.entity_name} ({imp.memory.memory.attribute}) "
+                f"[M{imp.memory.memory.id}]"
+                for imp in result.impact
+            ]
+            ans = (
+                f"Downstream impact analysis found {len(result.impact)} dependent(s): "
+                f"{', '.join(dep_summaries)}."
+            )
+            needs_rev = any(imp.memory.memory.needs_review for imp in result.impact)
+            if needs_rev:
+                ans += " Note: Dependent memories are flagged for review."
+            all_cited = [it.memory.id for it in result.items] + [
+                imp.memory.memory.id for imp in result.impact
+            ]
+            return ComposedAnswer(
+                answer_text=ans,
+                values=[imp.memory.memory.value_display for imp in result.impact],
+                referenced_memory_ids=all_cited,
+                explanation=(
+                    "Downstream dependents identified and flagged for review."
+                    if needs_rev
+                    else "Downstream dependents identified."
+                ),
+                is_uncertain=needs_rev,
+                is_complete=True,
+                needs_review_flagged=needs_rev,
+            )
+
+        # 4. Empty results (no memories found)
         if not result.items:
             note = (
                 result.notes[0] if result.notes else f"No relevant memory found for '{question}'."
@@ -165,7 +220,7 @@ class AnswerComposer:
                 is_complete=False,
             )
 
-        # 4. Single-memory answer
+        # 5. Single-memory answer
         if len(result.items) == 1:
             item = result.items[0]
             m = item.memory
@@ -174,7 +229,7 @@ class AnswerComposer:
 
             needs_review = m.needs_review
             is_uncertain = needs_review
-            explanation = self._build_single_memory_explanation(item)
+            explanation = self._build_single_memory_explanation(item, decisions=result.decisions)
             if needs_review:
                 ans += f" Note: Memory M{m.id} is flagged for review."
 

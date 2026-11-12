@@ -173,7 +173,12 @@ class ClaimExtractor:
             logger.warning("LLM extraction failed after repair retry: %s", exc)
             if raise_on_error:
                 raise
-            return ExtractionResult(claims=[])
+            return ExtractionResult(claims=[], error=str(exc))
+        except Exception as exc:
+            logger.warning("LLM extraction provider failure: %s", exc)
+            if raise_on_error:
+                raise
+            return ExtractionResult(claims=[], error=str(exc))
 
         # Post-process all extracted claims
         sanitized_claims: list[ExtractedClaim] = []
