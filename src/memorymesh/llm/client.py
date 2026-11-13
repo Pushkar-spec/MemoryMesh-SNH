@@ -214,6 +214,7 @@ class LLMClient:
         # Note: This cache is in-memory and process-local; it resets on process restart.
         self._cache: dict[str, BaseModel] = {}
         self._cache_lock = threading.Lock()
+        self.call_count: int = 0
 
     def _get_provider_name(self) -> str:
         """Derive an identifier for the injected LLM provider."""
@@ -352,6 +353,7 @@ class LLMClient:
 
         try:
             with self._semaphore:
+                self.call_count += 1
                 raw_response = self.provider.complete(
                     system=system,
                     user=user,
@@ -436,6 +438,7 @@ class LLMClient:
 
         try:
             with self._semaphore:
+                self.call_count += 1
                 repair_raw_response = self.provider.complete(
                     system=system,
                     user=repair_user_prompt,

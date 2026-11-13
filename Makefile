@@ -63,8 +63,7 @@ demo:
 	python scripts/demo_temporal_memory.py
 
 eval:
-	@echo ERROR: 'make eval' is pending P8 (Evaluation suite).
-	@exit 1
+	python eval/run_eval.py --mode structured
 
 reset:
 	@echo ERROR: 'make reset' is pending P0.3 (Database schema and db.py).

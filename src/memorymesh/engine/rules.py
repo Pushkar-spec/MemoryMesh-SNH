@@ -151,7 +151,7 @@ def resolve(
         )
 
     # 2. Filter candidate memories covering rc.valid_from
-    cover = [m for m in chain if covers(m, rc.valid_from)]
+    cover = [m for m in chain if (not cfg.ablation.use_temporal or covers(m, rc.valid_from))]
     live = [m for m in cover if m.status in (MemoryStatus.ACTIVE, MemoryStatus.DISPUTED)]
     hist = [m for m in cover if m.status == MemoryStatus.HISTORICAL]
 
@@ -238,7 +238,7 @@ def resolve(
         )
 
     # 4. Multi-valued attribute resolution (R-COEXIST, R-CORROBORATE)
-    if schema.cardinality == Cardinality.MULTI:
+    if schema.cardinality == Cardinality.MULTI and cfg.ablation.use_cardinality:
         for m in live:
             rel = classify(rc, m)
             if rel == Relation.IDENTICAL:
@@ -1184,7 +1184,10 @@ def _produce_r_retract(
     live = [
         m
         for m in chain
-        if m.status in (MemoryStatus.ACTIVE, MemoryStatus.DISPUTED) and covers(m, rc.valid_from)
+        if (
+            m.status in (MemoryStatus.ACTIVE, MemoryStatus.DISPUTED)
+            and (not cfg.ablation.use_temporal or covers(m, rc.valid_from))
+        )
     ]
 
     target: Memory | None = None

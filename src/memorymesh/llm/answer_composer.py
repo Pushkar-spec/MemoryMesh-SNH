@@ -317,13 +317,14 @@ class AnswerComposer:
             reference_time=reference_time,
         )
 
+        eff_model = model or self.default_model
         try:
             raw_res = self.llm_client.complete_json(
                 prompt_id="compose_answer",
                 system=system_prompt,
                 user=user_prompt,
                 response_model=LLMAnswerComposeResult,
-                model=model,
+                model=eff_model,
             )
         except Exception as e:
             logger.warning(

@@ -1164,7 +1164,11 @@ class MemoryService:
     ) -> MemoryView:
         attr_schema = self.repo.get_attribute_schema(m.attribute)
         half_life = attr_schema.half_life_days if attr_schema else None
-        decay = calculate_decay(m.valid_from, ref_time, half_life)
+        decay = (
+            calculate_decay(m.valid_from, ref_time, half_life)
+            if self.cfg.engine.ablation.use_temporal
+            else 1.0
+        )
         eff_conf = calculate_effective_confidence(
             m.confidence,
             decay_factor=decay,
@@ -1196,7 +1200,7 @@ class MemoryService:
         now: datetime,
     ) -> QueryResult:
         """Query memory valid at valid_at (defaults to now) as known at known_at."""
-        req_valid_at = valid_at or now
+        req_valid_at = now if not self.cfg.engine.ablation.use_temporal else (valid_at or now)
         if known_at is not None:
             if known_at.tzinfo is None or known_at.utcoffset() is None:
                 raise ValueError("known_at must be a timezone-aware datetime.")
@@ -1278,7 +1282,11 @@ class MemoryService:
         is_ambiguous = False
         ambiguity_reason = None
         attr_schema = self.repo.get_attribute_schema(attribute)
-        is_single = attr_schema is None or attr_schema.cardinality == Cardinality.SINGLE
+        is_single = (
+            attr_schema is None
+            or attr_schema.cardinality == Cardinality.SINGLE
+            or not self.cfg.engine.ablation.use_cardinality
+        )
 
         if is_single and len(items) > 1:
             distinct_contexts = {build_context_key(m.context) for m in memories}
@@ -1424,7 +1432,11 @@ class MemoryService:
             if ref_time.tzinfo is None or ref_time.utcoffset() is None:
                 raise ValueError("Clock must return a timezone-aware datetime.")
 
-        decay = calculate_decay(mem.valid_from, ref_time, half_life)
+        decay = (
+            calculate_decay(mem.valid_from, ref_time, half_life)
+            if self.cfg.engine.ablation.use_temporal
+            else 1.0
+        )
         return calculate_effective_confidence(
             mem.confidence,
             decay_factor=decay,
@@ -2012,11 +2024,13 @@ class MemoryService:
         reference_time: datetime | None = None,
         now: datetime | None = None,
         model: str | None = None,
+        plan: QueryPlan | dict[str, Any] | None = None,
+        deterministic_only: bool = False,
     ) -> AskResult:
         """Answer a natural question grounded in retrieved bitemporal memories (P7.3).
 
         Orchestration flow:
-        1. Parse question using QueryParser into structured ParsedQuery.
+        1. Parse question using QueryParser into structured ParsedQuery (or use explicit plan).
         2. Apply optional explicit parameter overrides (valid_at, as_of, known_at, context).
         3. Retrieve relevant memories, evidence, disputes, or impact via existing service methods.
         4. Compose and validate a natural-language answer via AnswerComposer.
@@ -2029,8 +2043,67 @@ class MemoryService:
             ref_time = ref_time.replace(tzinfo=UTC)
         ref_time = ref_time.astimezone(UTC)
 
-        # 1. Parse question
-        parsed_query = self.parse_query(question, reference_time=ref_time, model=model)
+        # 1. Parse question or use explicit plan
+        if plan is not None:
+            if isinstance(plan, dict):
+                raw_intent = str(plan.get("intent", "current")).strip().lower()
+                eff_intent = QueryIntent.CURRENT
+                for qi in QueryIntent:
+                    if qi.value == raw_intent:
+                        eff_intent = qi
+                        break
+                p_valid_at = plan.get("valid_at")
+                if isinstance(p_valid_at, str):
+                    try:
+                        p_valid_at = datetime.fromisoformat(p_valid_at.replace("Z", "+00:00"))
+                    except Exception:
+                        p_valid_at = None
+                p_known_at = plan.get("known_at")
+                if isinstance(p_known_at, str):
+                    try:
+                        p_known_at = datetime.fromisoformat(p_known_at.replace("Z", "+00:00"))
+                    except Exception:
+                        p_known_at = None
+                parsed_query = ParsedQuery(
+                    original_question=question,
+                    entity=plan.get("entity"),
+                    attribute=plan.get("attribute"),
+                    context=plan.get("context", {}),
+                    intent=eff_intent,
+                    valid_at=p_valid_at,
+                    known_at=p_known_at,
+                    is_historical=(
+                        eff_intent in (QueryIntent.AS_OF, QueryIntent.HISTORY)
+                        or p_valid_at is not None
+                        or p_known_at is not None
+                    ),
+                )
+            elif isinstance(plan, QueryPlan):
+                raw_intent = str(plan.intent).strip().lower()
+                eff_intent = QueryIntent.CURRENT
+                for qi in QueryIntent:
+                    if qi.value == raw_intent:
+                        eff_intent = qi
+                        break
+                parsed_query = ParsedQuery(
+                    original_question=question,
+                    entity=plan.entity,
+                    attribute=plan.attribute,
+                    context=plan.context,
+                    intent=eff_intent,
+                    valid_at=plan.valid_at,
+                    known_at=plan.known_at,
+                    memory_id=plan.memory_id,
+                    is_historical=(
+                        eff_intent in (QueryIntent.AS_OF, QueryIntent.HISTORY)
+                        or plan.valid_at is not None
+                        or plan.known_at is not None
+                    ),
+                )
+            else:
+                parsed_query = self.parse_query(question, reference_time=ref_time, model=model)
+        else:
+            parsed_query = self.parse_query(question, reference_time=ref_time, model=model)
 
         # Apply optional runtime overrides (valid_at and known_at remain independent)
         eff_valid_at = valid_at if valid_at is not None else as_of
@@ -2047,6 +2120,10 @@ class MemoryService:
             parsed_query.is_historical = True
         if context is not None:
             parsed_query.context = dict(context)
+
+        # Ablation A1: When temporal reasoning is disabled, point-in-time validity is ignored
+        if not self.cfg.engine.ablation.use_temporal:
+            parsed_query.valid_at = None
 
         # 2. Retrieve memories using existing service methods
         plan = parsed_query.to_query_plan()
@@ -2189,6 +2266,12 @@ class MemoryService:
                         include_rejected=False,
                         known_at=parsed_query.known_at,
                     )
+                    if self.cfg.engine.ablation.use_context:
+                        q_ctx = (
+                            normalize_context(parsed_query.context) if parsed_query.context else {}
+                        )
+                        all_mems = [m for m in all_mems if (m.context or {}) == q_ctx]
+                    all_mems = sorted(all_mems, key=lambda m: (m.valid_from.timestamp(), m.id or 0))
                     items = [self._build_memory_view(m, ref_time) for m in all_mems]
                     notes = (
                         []
@@ -2223,7 +2306,10 @@ class MemoryService:
                 )
 
         # 3. Compose answer
-        composer = AnswerComposer(llm_client=self.llm_client)
+        composer = AnswerComposer(
+            llm_client=None if deterministic_only else self.llm_client,
+            default_model=self.cfg.engine.llm.answer_model,
+        )
         composed = composer.compose(
             question=question,
             query=parsed_query,
@@ -2310,7 +2396,11 @@ class MemoryService:
         for mem in all_memories:
             if mem.status == MemoryStatus.ACTIVE:
                 attr_def = self.repo.get_attribute_schema(mem.attribute)
-                is_single = attr_def.cardinality == Cardinality.SINGLE if attr_def else True
+                is_single = (
+                    attr_def is None
+                    or attr_def.cardinality == Cardinality.SINGLE
+                    or not self.cfg.engine.ablation.use_cardinality
+                )
                 if is_single:
                     key = (mem.entity_id, mem.attribute, mem.context_key)
                     active_single_valued.setdefault(key, []).append(mem)

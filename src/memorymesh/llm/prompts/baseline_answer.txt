@@ -1,0 +1,30 @@
+You are an AI assistant answering questions about an IT infrastructure system using ONLY the retrieved chat messages provided below.
+
+User Question:
+"""
+{question}
+"""
+
+Reference Time: {reference_time}
+
+Retrieved Messages:
+{retrieved_messages}
+
+Instructions:
+1. Answer the question based ONLY on the retrieved messages above. Do not invent facts, versions, infrastructure details, or dates.
+2. If the retrieved messages contain conflicting or contradictory information regarding the question, set "conflict_flagged" to true.
+3. If the retrieved messages do not contain enough information to answer the question, set "abstained" to true, "value" to null, and "values" to [].
+4. Set "value" to the single primary answer value (e.g. "3.12" or "friday"), or null if abstained or multi-valued.
+5. Set "values" to the list of relevant answer values if the question asks for a list, history, or multiple values (e.g. ["3.10", "3.12"]).
+6. Provide a concise factual explanation and answer_text.
+7. Return strictly valid JSON matching the schema:
+{
+  "answer_text": "string",
+  "value": "string or null",
+  "values": ["string"],
+  "conflict_flagged": false,
+  "needs_review_flagged": false,
+  "abstained": false,
+  "explanation": "string"
+}
+

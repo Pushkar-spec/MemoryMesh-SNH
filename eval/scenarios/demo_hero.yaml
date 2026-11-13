@@ -1,0 +1,198 @@
+id: hero-001
+category: hero
+description: "Canonical hero scenario: Server A Python migration, Library X impact, Monday/Friday deploy dispute, staging context."
+now: "2026-06-25T09:00:00Z"
+messages:
+  - id: m1
+    t: "2026-01-10T09:00:00Z"
+    source: sysadmin_priya
+    text: "Server A runs Python 3.10."
+  - id: m2
+    t: "2026-02-02T11:30:00Z"
+    source: wiki
+    text: "Runtime for Server A: Python 3.10 (see infra page)."
+  - id: m3
+    t: "2026-02-10T10:00:00Z"
+    source: sysadmin_priya
+    text: "Server A deploys happen on Fridays."
+  - id: m4
+    t: "2026-03-05T14:00:00Z"
+    source: sysadmin_priya
+    text: "Library X is deployed on Server A and works fine with its Python 3.10 runtime."
+  - id: m5
+    t: "2026-06-01T08:00:00Z"
+    source: sysadmin_priya
+    text: "We migrated Server A to Python 3.12 today."
+  - id: m6
+    t: "2026-06-03T16:20:00Z"
+    source: intern_chat
+    text: "I think Server A is still on Python 3.9?"
+  - id: m7
+    t: "2026-06-15T10:10:00Z"
+    source: dev_chat
+    text: "FYI deploys for Server A are on Mondays now."
+  - id: m8
+    t: "2026-06-20T13:00:00Z"
+    source: dev_chat
+    text: "In staging, Server A still runs Python 3.11."
+structured_claims:
+  m1:
+    - subject: "Server A"
+      attribute: "python_version"
+      value: "3.10"
+      polarity: "assert"
+      valid_from: "2026-01-10T09:00:00Z"
+      extract_confidence: 0.95
+  m2:
+    - subject: "Server A"
+      attribute: "python_version"
+      value: "3.10"
+      polarity: "assert"
+      valid_from: "2026-02-02T11:30:00Z"
+      extract_confidence: 0.90
+  m3:
+    - subject: "Server A"
+      attribute: "deploy_day"
+      value: "friday"
+      polarity: "assert"
+      valid_from: "2026-02-10T10:00:00Z"
+      extract_confidence: 0.95
+  m4:
+    - subject: "Library X"
+      attribute: "compatibility_note"
+      value: "works fine with Python 3.10 runtime on Server A"
+      polarity: "assert"
+      valid_from: "2026-03-05T14:00:00Z"
+      depends_on:
+        - entity: "Server A"
+          attribute: "python_version"
+      extract_confidence: 0.95
+  m5:
+    - subject: "Server A"
+      attribute: "python_version"
+      value: "3.12"
+      previous_value: "3.10"
+      polarity: "assert"
+      valid_from: "2026-06-01T08:00:00Z"
+      extract_confidence: 0.95
+  m6:
+    - subject: "Server A"
+      attribute: "python_version"
+      value: "3.9"
+      polarity: "assert"
+      valid_from: "2026-06-03T16:20:00Z"
+      extract_confidence: 0.70
+  m7:
+    - subject: "Server A"
+      attribute: "deploy_day"
+      value: "monday"
+      polarity: "assert"
+      valid_from: "2026-06-15T10:10:00Z"
+      extract_confidence: 0.90
+  m8:
+    - subject: "Server A"
+      attribute: "python_version"
+      value: "3.11"
+      context:
+        env: "staging"
+      polarity: "assert"
+      valid_from: "2026-06-20T13:00:00Z"
+      extract_confidence: 0.90
+expected_decisions:
+  m1: "R-INSERT"
+  m2: "R-CORROBORATE"
+  m3: "R-INSERT"
+  m4: "R-INSERT"
+  m5: "R-REPLACE"
+  m6: "R-REJECT"
+  m7: "R-DISPUTE"
+  m8: "R-INSERT"
+questions:
+  - id: "q1"
+    type: "current"
+    text: "What Python version does Server A use?"
+    plan:
+      entity: "Server A"
+      attribute: "python_version"
+      intent: "current"
+      temporal_intent: "current"
+      query_type: "fact_lookup"
+    expect:
+      value: "3.12"
+      forbidden: ["3.10", "3.9"]
+  - id: "q2"
+    type: "as_of"
+    text: "What Python version did Server A use in March?"
+    plan:
+      entity: "Server A"
+      attribute: "python_version"
+      intent: "as_of"
+      temporal_intent: "as_of"
+      query_type: "fact_lookup"
+      valid_at: "2026-03-15T00:00:00Z"
+    expect:
+      value: "3.10"
+      forbidden: ["3.12", "3.9"]
+  - id: "q3"
+    type: "why"
+    text: "Why do you believe Server A is on Python 3.12?"
+    plan:
+      entity: "Server A"
+      attribute: "python_version"
+      intent: "why"
+      temporal_intent: "current"
+      query_type: "explanation"
+    expect:
+      cited_source: "sysadmin_priya"
+      rule_id: "R-REPLACE"
+  - id: "q4"
+    type: "impact"
+    text: "What might break because of the Python migration on Server A?"
+    plan:
+      entity: "Server A"
+      attribute: "python_version"
+      intent: "impact"
+      temporal_intent: "current"
+      query_type: "dependency_impact"
+    expect:
+      dependents:
+        - ["Library X", "compatibility_note"]
+      needs_review_flagged: true
+  - id: "q5"
+    type: "current"
+    text: "Which day does Server A deploy?"
+    plan:
+      entity: "Server A"
+      attribute: "deploy_day"
+      intent: "current"
+      temporal_intent: "current"
+      query_type: "fact_lookup"
+    expect:
+      conflict_flagged: true
+      values: ["friday", "monday"]
+  - id: "q6"
+    type: "current"
+    text: "What Python version does Server A use in staging?"
+    plan:
+      entity: "Server A"
+      attribute: "python_version"
+      context:
+        env: "staging"
+      intent: "current"
+      temporal_intent: "current"
+      query_type: "fact_lookup"
+    expect:
+      value: "3.11"
+  - id: "q7"
+    type: "history"
+    text: "Which Python versions has Server A had?"
+    plan:
+      entity: "Server A"
+      attribute: "python_version"
+      intent: "history"
+      temporal_intent: "history"
+      query_type: "timeline_history"
+    expect:
+      values: ["3.10", "3.12"]
+      forbidden: ["3.9"]
+

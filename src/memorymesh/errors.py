@@ -78,3 +78,11 @@ class LLMOutputError(LLMError):
         super().__init__(sanitized_msg)
         self.raw_response = sanitize_sensitive_text(raw_response, max_len=1000)
         self.details = sanitize_sensitive_text(details, max_len=500)
+
+
+class BaselineError(MemoryMeshError):
+    """Base exception for baseline system errors."""
+
+
+class BaselineEmbeddingError(BaselineError):
+    """Raised when baseline embedding model fails to load, download weights, or execute."""
