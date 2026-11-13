@@ -11,6 +11,7 @@ fuzzy:
   entity_auto_match: 90          # rapidfuzz token_set_ratio
   entity_tiebreak_min: 75
   text_duplicate_candidate: 70   # min ratio before asking the LLM classifier
+  entity_llm_tiebreak_confidence: 0.80  # stretch P7.5: min confidence to accept LLM tiebreak proposal
 ablation:                        # all true in production; eval flips them one at a time
   use_temporal: true
   use_trust: true

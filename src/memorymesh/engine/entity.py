@@ -49,6 +49,7 @@ class EntityResolutionResult(NamedTuple):
     needs_review: bool
     score: float
     matched_candidate_name: str | None = None
+    ambiguous_candidates: tuple[EntityCandidate, ...] = ()
 
 
 def resolve_entity(
@@ -113,6 +114,7 @@ def resolve_entity(
             needs_review=True,
             score=100.0,
             matched_candidate_name=None,
+            ambiguous_candidates=tuple(exact_matches),
         )
 
     if len(exact_matches) == 1:
@@ -175,6 +177,7 @@ def resolve_entity(
             needs_review=True,
             score=max_score,
             matched_candidate_name=None,
+            ambiguous_candidates=tuple(top_candidates),
         )
 
     # Single top candidate

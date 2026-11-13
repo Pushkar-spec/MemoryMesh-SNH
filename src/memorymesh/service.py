@@ -6,6 +6,7 @@ Governed by docs/SPECIFICATION.md Section 2, docs/ARCHITECTURE.md, and docs/AGEN
 from __future__ import annotations
 
 import hashlib
+import logging
 import sqlite3
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
@@ -51,6 +52,8 @@ from memorymesh.errors import (
     NormalizationError,
     UnknownSourceError,
 )
+from memorymesh.llm.client import sanitize_sensitive_text
+from memorymesh.llm.prompts import build_tiebreak_entity_prompt
 from memorymesh.models import (
     Action,
     AddEdge,
@@ -62,6 +65,8 @@ from memorymesh.models import (
     DecisionLogEntry,
     DisputeView,
     EdgeType,
+    EntityTiebreakCandidate,
+    EntityTiebreakResult,
     Evidence,
     ImpactItem,
     IngestMessage,
@@ -93,6 +98,8 @@ from memorymesh.retrieval.retrieve import (
     retrieve_current,
     retrieve_valid_memories,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _make_classifier(
@@ -303,6 +310,24 @@ class MemoryService:
                         self.repo.insert_entity_alias(normalize_entity_name(alias), entity_id)
             return entity_id
 
+        # Stretch P7.5: LLM tie-break for ambiguous match candidates
+        if (
+            res.action == EntityResolutionAction.AMBIGUOUS_MATCH
+            and len(res.ambiguous_candidates) > 1
+            and self.llm_client is not None
+        ):
+            resolved_id = self._tiebreak_ambiguous_candidates(
+                subject=subject,
+                ambiguous_candidates=res.ambiguous_candidates,
+            )
+            if resolved_id is not None:
+                # LLM proposed a valid, high-confidence candidate ID from supplied set
+                # Only register alias if not already owned by another entity (no alias stealing)
+                existing_alias_owner = self.repo.get_entity_by_alias(norm_subject)
+                if existing_alias_owner is None:
+                    self.repo.insert_entity_alias(norm_subject, resolved_id)
+                return resolved_id
+
         # Ambiguous, review-level, or unknown: create separate entity with review flag
         entity_id = self.repo.insert_entity(
             canonical_name=res.canonical_name,
@@ -314,6 +339,94 @@ class MemoryService:
         if res.action != EntityResolutionAction.AMBIGUOUS_MATCH:
             self.repo.insert_entity_alias(norm_subject, entity_id)
         return entity_id
+
+    def _tiebreak_ambiguous_candidates(
+        self,
+        subject: str,
+        ambiguous_candidates: tuple[EntityCandidate, ...],
+    ) -> int | None:
+        """Execute LLM tie-break and deterministically validate the proposal (P7.5).
+
+        Returns the matched entity ID if valid and high confidence, or None to fall back
+        to existing deterministic review behavior.
+        """
+        valid_candidates: list[EntityTiebreakCandidate] = []
+        candidate_id_set: set[int] = set()
+
+        for cand in ambiguous_candidates:
+            c_id = cand.db_id
+            if c_id is None:
+                stored = self.repo.get_entity_by_name(cand.canonical_name)
+                if stored is not None:
+                    c_id = int(stored["id"])
+            if c_id is not None and c_id not in candidate_id_set:
+                valid_candidates.append(
+                    EntityTiebreakCandidate(
+                        id=c_id,
+                        canonical_name=cand.canonical_name,
+                        aliases=list(cand.aliases),
+                    )
+                )
+                candidate_id_set.add(c_id)
+
+        # Must have at least two distinct candidates with valid IDs
+        if len(candidate_id_set) < 2 or self.llm_client is None:
+            return None
+
+        system_prompt, user_prompt = build_tiebreak_entity_prompt(subject, valid_candidates)
+        min_confidence = float(
+            getattr(self.cfg.engine.fuzzy, "entity_llm_tiebreak_confidence", 0.80)
+        )
+        eff_model = self.cfg.engine.llm.fast_model
+
+        try:
+            proposal = self.llm_client.complete_json(
+                prompt_id="tiebreak_entity",
+                system=system_prompt,
+                user=user_prompt,
+                response_model=EntityTiebreakResult,
+                model=eff_model,
+            )
+        except (TypeError, AttributeError, NameError, KeyError):
+            # Do not silently swallow unexpected programming errors
+            raise
+        except Exception as exc:
+            sanitized_err = sanitize_sensitive_text(str(exc), max_len=200)
+            logger.warning(
+                "LLM entity tie-break failed: %s; falling back to deterministic resolution.",
+                sanitized_err,
+            )
+            return None
+
+        # Deterministic validation layer
+        # 1. Proposal must not be an explicit abstention
+        if proposal.abstained:
+            logger.info("LLM tie-break abstained for subject '%s'.", subject)
+            return None
+
+        # 2. Selected candidate ID must be present and belong to the supplied set
+        if (
+            proposal.selected_entity_id is None
+            or proposal.selected_entity_id not in candidate_id_set
+        ):
+            logger.warning(
+                "LLM tie-break proposed invalid candidate ID %s (valid: %s).",
+                proposal.selected_entity_id,
+                candidate_id_set,
+            )
+            return None
+
+        # 3. Confidence must meet or exceed the configured threshold
+        if proposal.confidence < min_confidence:
+            logger.info(
+                "LLM tie-break confidence %s below threshold %s for subject '%s'.",
+                proposal.confidence,
+                min_confidence,
+                subject,
+            )
+            return None
+
+        return proposal.selected_entity_id
 
     # =========================================================================
     # Extraction & Ingestion (P7.2)

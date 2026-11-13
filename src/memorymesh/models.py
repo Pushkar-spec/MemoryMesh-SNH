@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_serializer
+from pydantic import BaseModel, Field, field_serializer, model_validator
 
 # ==============================================================================
 # Base Model with Timestamp Serialization
@@ -102,6 +102,31 @@ class RelationClassificationResult(MeshBaseModel):
     relation: RelationProposal
     confidence: float = Field(ge=0.0, le=1.0)
     reason: str = Field(default="")
+
+
+class EntityTiebreakCandidate(MeshBaseModel):
+    """Candidate entity presented for LLM tie-breaking (P7.5)."""
+
+    id: int
+    canonical_name: str
+    aliases: list[str] = Field(default_factory=list)
+
+
+class EntityTiebreakResult(MeshBaseModel):
+    """Structured LLM proposal for entity resolution tie-breaking (P7.5)."""
+
+    selected_entity_id: int | None = None
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    explanation: str = ""
+    abstained: bool = False
+
+    @model_validator(mode="after")
+    def validate_proposal(self) -> EntityTiebreakResult:
+        if self.abstained and self.selected_entity_id is not None:
+            raise ValueError(
+                "An abstained tiebreak proposal must not specify a selected_entity_id."
+            )
+        return self
 
 
 class Action(StrEnum):

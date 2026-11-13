@@ -82,7 +82,7 @@ Each stage has one job and a typed input/output (models in `SPECIFICATION.md`).
 | # | Stage | Input | Output | Rules |
 | :-: | :--- | :--- | :--- | :--- |
 | 1 | Extractor | `IngestMessage` | `list[Claim]` | LLM, constrained to attribute catalog; may return `[]` |
-| 2 | Normalizer / Entity Resolver | `Claim` | `ResolvedClaim` or `SKIP` | Normalize value by `value_type`; resolve subject to `entity_id`; unknown attribute -> `SKIP` |
+| 2 | Normalizer / Entity Resolver | `Claim` | `ResolvedClaim` or `SKIP` | Normalize value by `value_type`; resolve subject to `entity_id` via deterministic two-tier matching (Tier 1 exact, Tier 2 fuzzy) with optional LLM tie-break (P7.5 stretch) for ambiguous tied candidates; unknown attribute -> `SKIP` |
 | 3 | Candidate Finder | `ResolvedClaim` | `chain: list[Memory]` | All non-rejected memories for `(entity, attribute, context_key)` sorted by `valid_from`, with evidence |
 | 4 | Relation Classifier | `(ResolvedClaim, Memory)` | `Relation` | Deterministic by value type; LLM only for `text` values |
 | 5 | Resolution Engine | claim, chain, schema, source, config | `Decision` | Pure. Rules in `RESOLUTION_ENGINE.md` |
@@ -243,6 +243,22 @@ flowchart TD
      make smoke
      pytest tests/test_llm_client.py
      ```
+
+8. **Optional Entity-Resolution LLM Tie-Break (P7.5 Stretch)**:
+   - **Invocation Condition**: Invoked strictly when deterministic resolution has completed all existing tiers (Tier 1 exact, Tier 2 fuzzy) and produces an ambiguous candidate set (`AMBIGUOUS_MATCH`, e.g. alias collision or top-score fuzzy tie) with more than one plausible candidate and an active `LLMClient`. The LLM tie-break is **never** invoked for exact matches, deterministically resolved fuzzy matches (`>= auto_match_threshold`), new entities with no plausible candidates (`UNKNOWN`), or single-candidate review-level matches (`REVIEW_MATCH`).
+   - **Supplied Candidate Information**: The LLM prompt (`tiebreak_entity.txt`) provides only the ambiguous mentioned subject and candidate entities with stable database integer IDs (`id`), canonical names (`canonical_name`), and known aliases (`aliases`).
+   - **Structured Response Schema**: `EntityTiebreakResult` containing:
+     - `selected_entity_id: int | None` (the recommended database candidate ID, or `null` if abstaining).
+     - `confidence: float` (bounded between `0.0` and `1.0`).
+     - `explanation: str` (factual justification citing only supplied candidate details).
+     - `abstained: bool` (explicit indicator of unresolved outcome; if `true`, `selected_entity_id` must be `null`).
+   - **Deterministic Validation & Confidence Policy**: The LLM output is purely advisory. To be accepted:
+     1. `abstained` must be `false`.
+     2. `selected_entity_id` must be present and must belong strictly to the supplied candidate ID set.
+     3. `confidence` must meet or exceed `entity_llm_tiebreak_confidence` (default `0.80`, configured in `config/engine.yaml` / `FuzzyConfig`).
+   - **Entity and Alias Safety**: The LLM cannot create new entities or merge existing entities. A successful tie-break assigns the incoming claim to the existing candidate entity and registers the alias only if it is not already owned by another entity. It never transfers or steals existing aliases across entities.
+   - **Deterministic Fallback**: If the LLM is disabled (`llm=None`), times out, throws a provider exception, outputs malformed JSON, fails Pydantic validation, or returns confidence below threshold, the system safely falls back to standard P2.2 deterministic behavior: a separate entity flagged with `needs_review=1` is created, and no colliding alias is registered.
+   - **Authoritative Determinism**: Deterministic resolution remains authoritative; LLM tie-breaking operates solely as an optional, safe advisory helper.
 
 ---
 

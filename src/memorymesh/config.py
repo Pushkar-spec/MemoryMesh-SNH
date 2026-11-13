@@ -96,6 +96,7 @@ class FuzzyConfig(BaseModel):
     entity_auto_match: int = Field(ge=0, le=100)
     entity_tiebreak_min: int = Field(ge=0, le=100)
     text_duplicate_candidate: int = Field(ge=0, le=100)
+    entity_llm_tiebreak_confidence: float = Field(default=0.80, ge=0.0, le=1.0)
 
 
 class AblationConfig(BaseModel):
