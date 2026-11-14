@@ -1,0 +1,31 @@
+id: lose-003
+category: designed_to_lose
+description: Unsupported historical date prior to any records produces abstention.
+now: '2026-06-25T09:00:00Z'
+messages:
+- id: m1
+  t: '2026-06-01T09:00:00Z'
+  source: sysadmin_priya
+  text: Server A runs Python 3.12.
+structured_claims:
+  m1:
+  - subject: Server A
+    attribute: python_version
+    value: '3.12'
+    polarity: assert
+    valid_from: '2026-06-01T09:00:00Z'
+    extract_confidence: 0.95
+expected_decisions:
+  m1: R-INSERT
+questions:
+- id: q1
+  type: as_of
+  text: What Python version did Server A use in 2024?
+  plan:
+    entity: Server A
+    attribute: python_version
+    valid_at: '2024-01-01T00:00:00Z'
+    intent: as_of
+  expect:
+    abstain: true
+    value: null

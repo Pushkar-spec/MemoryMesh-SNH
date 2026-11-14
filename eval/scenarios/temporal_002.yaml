@@ -1,0 +1,56 @@
+id: temporal-002
+category: historical_time_travel
+description: Transaction-time query tests what MemoryMesh believed at earlier recorded
+  times.
+now: '2026-06-25T09:00:00Z'
+messages:
+- id: m1
+  t: '2026-06-01T12:00:00Z'
+  source: sysadmin_priya
+  text: Server A migrated to Python 3.12.
+- id: m2
+  t: '2026-06-15T12:00:00Z'
+  source: sysadmin_priya
+  text: 'Archived record: Server A was on Python 3.10 in January.'
+structured_claims:
+  m1:
+  - subject: Server A
+    attribute: python_version
+    value: '3.12'
+    polarity: assert
+    valid_from: '2026-06-01T00:00:00Z'
+    extract_confidence: 0.95
+  m2:
+  - subject: Server A
+    attribute: python_version
+    value: '3.10'
+    polarity: assert
+    valid_from: '2026-01-10T00:00:00Z'
+    extract_confidence: 0.95
+expected_decisions:
+  m1: R-INSERT
+  m2: R-BACKFILL
+questions:
+- id: q1
+  type: as_of
+  text: What was believed on June 5 about Python version in March?
+  plan:
+    entity: Server A
+    attribute: python_version
+    valid_at: '2026-03-01T00:00:00Z'
+    known_at: '2026-06-05T00:00:00Z'
+    intent: as_of
+  expect:
+    abstain: true
+    value: null
+- id: q2
+  type: as_of
+  text: What was believed on June 20 about Python version in March?
+  plan:
+    entity: Server A
+    attribute: python_version
+    valid_at: '2026-03-01T00:00:00Z'
+    known_at: '2026-06-20T00:00:00Z'
+    intent: as_of
+  expect:
+    value: '3.10'

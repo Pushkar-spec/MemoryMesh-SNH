@@ -1,0 +1,78 @@
+id: dependency-002
+category: dependency_propagation
+description: Multi-level transitive dependency chain propagates impact to all downstream
+  memories.
+now: '2026-06-25T09:00:00Z'
+messages:
+- id: m1
+  t: '2026-01-10T09:00:00Z'
+  source: sysadmin_priya
+  text: Server A runs Python 3.10.
+- id: m2
+  t: '2026-02-01T10:00:00Z'
+  source: sysadmin_priya
+  text: Library X compatibility depends on Server A Python version.
+- id: m3
+  t: '2026-03-01T11:00:00Z'
+  source: sysadmin_priya
+  text: Server B runs api-gateway relying on Library X.
+- id: m4
+  t: '2026-06-01T08:00:00Z'
+  source: sysadmin_priya
+  text: Migrated Server A to Python 3.12 today.
+structured_claims:
+  m1:
+  - subject: Server A
+    attribute: python_version
+    value: '3.10'
+    polarity: assert
+    valid_from: '2026-01-10T09:00:00Z'
+    extract_confidence: 0.95
+  m2:
+  - subject: Library X
+    attribute: compatibility_note
+    value: depends on 3.10
+    depends_on:
+    - entity: Server A
+      attribute: python_version
+    polarity: assert
+    valid_from: '2026-02-01T10:00:00Z'
+    extract_confidence: 0.95
+  m3:
+  - subject: Server B
+    attribute: runs_service
+    value: api-gateway
+    depends_on:
+    - entity: Library X
+      attribute: compatibility_note
+    polarity: assert
+    valid_from: '2026-03-01T11:00:00Z'
+    extract_confidence: 0.95
+  m4:
+  - subject: Server A
+    attribute: python_version
+    value: '3.12'
+    previous_value: '3.10'
+    polarity: assert
+    valid_from: '2026-06-01T08:00:00Z'
+    extract_confidence: 0.95
+expected_decisions:
+  m1: R-INSERT
+  m2: R-INSERT
+  m3: R-INSERT
+  m4: R-REPLACE
+questions:
+- id: q1
+  type: impact
+  text: What might break from Server A Python upgrade across dependency chains?
+  plan:
+    entity: Server A
+    attribute: python_version
+    intent: impact
+  expect:
+    dependents:
+    - - Library X
+      - compatibility_note
+    - - Server B
+      - runs_service
+    needs_review_flagged: true

@@ -1,0 +1,55 @@
+id: ordering-002
+category: out_of_order
+description: Delayed administrative assertion arrives after a newer OS migration.
+now: '2026-06-25T09:00:00Z'
+messages:
+- id: m1
+  t: '2026-06-01T08:00:00Z'
+  source: sysadmin_priya
+  text: Server A migrated to Ubuntu 24.04 LTS today.
+- id: m2
+  t: '2026-06-12T14:00:00Z'
+  source: sysadmin_priya
+  text: 'Historical archive: in February, Server A was on Debian 12.'
+structured_claims:
+  m1:
+  - subject: Server A
+    attribute: os_release
+    value: ubuntu 24.04 lts
+    polarity: assert
+    valid_from: '2026-06-01T08:00:00Z'
+    extract_confidence: 0.95
+  m2:
+  - subject: Server A
+    attribute: os_release
+    value: debian 12
+    polarity: assert
+    valid_from: '2026-02-01T00:00:00Z'
+    extract_confidence: 0.95
+expected_decisions:
+  m1: R-INSERT
+  m2: R-BACKFILL
+questions:
+- id: q1
+  type: current
+  text: What OS release does Server A run?
+  plan:
+    entity: Server A
+    attribute: os_release
+    intent: current
+  expect:
+    value: ubuntu 24.04 lts
+    forbidden:
+    - debian 12
+- id: q2
+  type: as_of
+  text: What OS release was Server A running in April?
+  plan:
+    entity: Server A
+    attribute: os_release
+    valid_at: '2026-04-01T00:00:00Z'
+    intent: as_of
+  expect:
+    value: debian 12
+    forbidden:
+    - ubuntu 24.04 lts

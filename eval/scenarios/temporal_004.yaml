@@ -1,0 +1,56 @@
+id: temporal-004
+category: historical_time_travel
+description: Retraction ends valid time; queries before retraction succeed, queries
+  after abstain.
+now: '2026-06-25T09:00:00Z'
+messages:
+- id: m1
+  t: '2026-01-10T09:00:00Z'
+  source: sysadmin_priya
+  text: Server A is undergoing maintenance.
+- id: m2
+  t: '2026-02-01T10:00:00Z'
+  source: sysadmin_priya
+  text: Server A maintenance window has ended.
+structured_claims:
+  m1:
+  - subject: Server A
+    attribute: service_status
+    value: maintenance
+    polarity: assert
+    valid_from: '2026-01-10T09:00:00Z'
+    extract_confidence: 0.95
+  m2:
+  - subject: Server A
+    attribute: service_status
+    value: maintenance
+    polarity: retract
+    valid_from: '2026-02-01T10:00:00Z'
+    extract_confidence: 0.95
+expected_decisions:
+  m1: R-INSERT
+  m2: R-RETRACT
+questions:
+- id: q1
+  type: as_of
+  text: What was Server A service status in January?
+  plan:
+    entity: Server A
+    attribute: service_status
+    valid_at: '2026-01-20T00:00:00Z'
+    intent: as_of
+  expect:
+    value: maintenance
+- id: q2
+  type: as_of
+  text: What was Server A service status in March?
+  plan:
+    entity: Server A
+    attribute: service_status
+    valid_at: '2026-03-01T00:00:00Z'
+    intent: as_of
+  expect:
+    abstain: true
+    value: null
+    forbidden:
+    - maintenance

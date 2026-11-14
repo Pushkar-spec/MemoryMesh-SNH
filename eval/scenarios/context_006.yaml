@@ -1,0 +1,77 @@
+id: context-006
+category: context_isolation
+description: Project context isolation between alpha and beta, with un-scoped abstention.
+now: '2026-06-25T09:00:00Z'
+messages:
+- id: m1
+  t: '2026-01-10T09:00:00Z'
+  source: sysadmin_priya
+  text: In Project Alpha, Server A runs Python 3.12.
+- id: m2
+  t: '2026-01-12T10:00:00Z'
+  source: ci_monitor
+  text: In Project Beta, Server A runs Python 3.11.
+structured_claims:
+  m1:
+  - subject: Server A
+    attribute: python_version
+    value: '3.12'
+    context:
+      project: alpha
+    polarity: assert
+    valid_from: '2026-01-10T09:00:00Z'
+    extract_confidence: 0.95
+  m2:
+  - subject: Server A
+    attribute: python_version
+    value: '3.11'
+    context:
+      project: beta
+    polarity: assert
+    valid_from: '2026-01-12T10:00:00Z'
+    extract_confidence: 0.95
+expected_decisions:
+  m1: R-INSERT
+  m2: R-INSERT
+questions:
+- id: q1
+  type: current
+  text: What Python version does Server A use in Project Alpha?
+  plan:
+    entity: Server A
+    attribute: python_version
+    intent: current
+    context:
+      project: alpha
+  expect:
+    value: '3.12'
+    forbidden:
+    - '3.11'
+- id: q2
+  type: current
+  text: What Python version does Server A use in Project Beta?
+  plan:
+    entity: Server A
+    attribute: python_version
+    intent: current
+    context:
+      project: beta
+  expect:
+    value: '3.11'
+    forbidden:
+    - '3.12'
+- id: q3
+  type: current
+  text: What Python version does Server A use globally without project context?
+  plan:
+    entity: Server A
+    attribute: python_version
+    intent: current
+    context: {}
+  expect:
+    abstain: true
+    value: null
+    forbidden:
+    - '3.11'
+    - '3.12'
+

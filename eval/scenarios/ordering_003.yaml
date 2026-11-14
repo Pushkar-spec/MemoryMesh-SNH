@@ -1,0 +1,55 @@
+id: ordering-003
+category: out_of_order
+description: Reverse chronological arrival order of service status claims.
+now: '2026-06-25T09:00:00Z'
+messages:
+- id: m1
+  t: '2026-06-05T10:00:00Z'
+  source: ci_monitor
+  text: Server A operational status is degraded starting May.
+- id: m2
+  t: '2026-06-06T11:00:00Z'
+  source: ci_monitor
+  text: 'Delayed sync: Server A was operational and up in January.'
+structured_claims:
+  m1:
+  - subject: Server A
+    attribute: service_status
+    value: degraded
+    polarity: assert
+    valid_from: '2026-05-01T00:00:00Z'
+    extract_confidence: 0.95
+  m2:
+  - subject: Server A
+    attribute: service_status
+    value: up
+    polarity: assert
+    valid_from: '2026-01-01T00:00:00Z'
+    extract_confidence: 0.95
+expected_decisions:
+  m1: R-INSERT
+  m2: R-BACKFILL
+questions:
+- id: q1
+  type: current
+  text: What is the operational status of Server A?
+  plan:
+    entity: Server A
+    attribute: service_status
+    intent: current
+  expect:
+    value: degraded
+    forbidden:
+    - up
+- id: q2
+  type: as_of
+  text: What was the operational status of Server A in February?
+  plan:
+    entity: Server A
+    attribute: service_status
+    valid_at: '2026-02-15T00:00:00Z'
+    intent: as_of
+  expect:
+    value: up
+    forbidden:
+    - degraded

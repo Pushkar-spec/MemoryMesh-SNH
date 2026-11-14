@@ -1,0 +1,45 @@
+id: lose-002
+category: designed_to_lose
+description: Peer dispute without sufficient authority flags conflict rather than
+  forcing a winner.
+now: '2026-06-25T09:00:00Z'
+messages:
+- id: m1
+  t: '2026-01-10T09:00:00Z'
+  source: sysadmin_priya
+  text: Server A deploys happen on Fridays.
+- id: m2
+  t: '2026-06-15T10:10:00Z'
+  source: dev_chat
+  text: FYI deploys for Server A are on Mondays now.
+structured_claims:
+  m1:
+  - subject: Server A
+    attribute: deploy_day
+    value: friday
+    polarity: assert
+    valid_from: '2026-01-10T09:00:00Z'
+    extract_confidence: 0.95
+  m2:
+  - subject: Server A
+    attribute: deploy_day
+    value: monday
+    polarity: assert
+    valid_from: '2026-06-15T10:10:00Z'
+    extract_confidence: 0.9
+expected_decisions:
+  m1: R-INSERT
+  m2: R-DISPUTE
+questions:
+- id: q1
+  type: current
+  text: Which day does Server A deploy?
+  plan:
+    entity: Server A
+    attribute: deploy_day
+    intent: current
+  expect:
+    conflict_flagged: true
+    values:
+    - friday
+    - monday

@@ -29,6 +29,14 @@ from memorymesh.llm.providers import LLMProvider
 
 SCENARIOS_DIR = Path("eval/scenarios")
 
+P82_CATEGORIES = {
+    "simple_update",
+    "corroboration",
+    "low_trust_reject",
+    "dispute",
+    "multi_valued",
+}
+
 
 def test_load_all_p82_scenarios_schema_validation() -> None:
     """Verifies all P8.2 scenarios can be loaded and conform to the scenario schema."""
@@ -182,7 +190,7 @@ def test_p82_reproducible_structured_results() -> None:
     """Verifies evaluation on P8.2 scenarios produces identical results."""
     cfg = load_app_config()
     all_scenarios = load_scenarios(SCENARIOS_DIR)
-    p82_scenarios = [s for s in all_scenarios if s.get("category") != "hero"]
+    p82_scenarios = [s for s in all_scenarios if s.get("category") in P82_CATEGORIES]
 
     metrics1, _ = run_system_on_scenarios(
         system_id="MM",
@@ -554,7 +562,7 @@ def test_p82_all_scenarios_engine_only_mode() -> None:
     """Verifies all 24 P8.2 scenarios execute in engine-only mode with 0 LLM calls."""
     cfg = load_app_config()
     all_scenarios = load_scenarios(SCENARIOS_DIR)
-    p82_scenarios = [s for s in all_scenarios if s.get("category") != "hero"]
+    p82_scenarios = [s for s in all_scenarios if s.get("category") in P82_CATEGORIES]
     assert len(p82_scenarios) == 24
 
     metrics, traces = run_system_on_scenarios(
@@ -592,7 +600,7 @@ def test_p82_all_scenarios_e2e_mode() -> None:
     """Verifies all 24 P8.2 scenarios execute in E2E mode with a deterministic provider."""
     cfg = load_app_config()
     all_scenarios = load_scenarios(SCENARIOS_DIR)
-    p82_scenarios = [s for s in all_scenarios if s.get("category") != "hero"]
+    p82_scenarios = [s for s in all_scenarios if s.get("category") in P82_CATEGORIES]
     assert len(p82_scenarios) == 24
 
     provider = P82DeterministicE2EProvider()
@@ -638,7 +646,7 @@ def test_p82_all_scenarios_naive_rag_baseline_mode() -> None:
     """
     cfg = load_app_config()
     all_scenarios = load_scenarios(SCENARIOS_DIR)
-    p82_scenarios = [s for s in all_scenarios if s.get("category") != "hero"]
+    p82_scenarios = [s for s in all_scenarios if s.get("category") in P82_CATEGORIES]
     assert len(p82_scenarios) == 24
 
     b0_provider = P82NaiveRAGBaselineProvider()

@@ -1,0 +1,31 @@
+id: lose-001
+category: designed_to_lose
+description: 'Insufficient evidence: query asks for an unrecorded attribute and system
+  safely abstains.'
+now: '2026-06-25T09:00:00Z'
+messages:
+- id: m1
+  t: '2026-01-10T09:00:00Z'
+  source: sysadmin_priya
+  text: Server A runs Python 3.12.
+structured_claims:
+  m1:
+  - subject: Server A
+    attribute: python_version
+    value: '3.12'
+    polarity: assert
+    valid_from: '2026-01-10T09:00:00Z'
+    extract_confidence: 0.95
+expected_decisions:
+  m1: R-INSERT
+questions:
+- id: q1
+  type: current
+  text: Which day does Server A deploy?
+  plan:
+    entity: Server A
+    attribute: deploy_day
+    intent: current
+  expect:
+    abstain: true
+    value: null

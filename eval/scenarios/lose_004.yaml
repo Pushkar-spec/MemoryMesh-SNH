@@ -1,0 +1,43 @@
+id: lose-004
+category: designed_to_lose
+description: Low-trust rumor is rejected; system refuses to adopt unverified claim.
+now: '2026-06-25T09:00:00Z'
+messages:
+- id: m1
+  t: '2026-01-10T09:00:00Z'
+  source: sysadmin_priya
+  text: Server A runs Python 3.12.
+- id: m2
+  t: '2026-01-12T11:00:00Z'
+  source: intern_chat
+  text: I think Server A is on Python 3.9.
+structured_claims:
+  m1:
+  - subject: Server A
+    attribute: python_version
+    value: '3.12'
+    polarity: assert
+    valid_from: '2026-01-10T09:00:00Z'
+    extract_confidence: 0.95
+  m2:
+  - subject: Server A
+    attribute: python_version
+    value: '3.9'
+    polarity: assert
+    valid_from: '2026-01-12T11:00:00Z'
+    extract_confidence: 0.7
+expected_decisions:
+  m1: R-INSERT
+  m2: R-REJECT
+questions:
+- id: q1
+  type: current
+  text: What Python version does Server A use?
+  plan:
+    entity: Server A
+    attribute: python_version
+    intent: current
+  expect:
+    value: '3.12'
+    forbidden:
+    - '3.9'

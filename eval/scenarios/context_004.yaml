@@ -1,0 +1,72 @@
+id: context-004
+category: context_isolation
+description: Specific context overrides global fallback without affecting global or
+  unrelated contexts.
+now: '2026-06-25T09:00:00Z'
+messages:
+- id: m1
+  t: '2026-01-15T09:00:00Z'
+  source: sysadmin_priya
+  text: Server A deploys on Friday.
+- id: m2
+  t: '2026-02-10T11:00:00Z'
+  source: sysadmin_priya
+  text: In staging, Server A deploys on Wednesday.
+structured_claims:
+  m1:
+  - subject: Server A
+    attribute: deploy_day
+    value: friday
+    polarity: assert
+    valid_from: '2026-01-15T09:00:00Z'
+    extract_confidence: 0.95
+  m2:
+  - subject: Server A
+    attribute: deploy_day
+    value: wednesday
+    context:
+      env: staging
+    polarity: assert
+    valid_from: '2026-02-10T11:00:00Z'
+    extract_confidence: 0.95
+expected_decisions:
+  m1: R-INSERT
+  m2: R-INSERT
+questions:
+- id: q1
+  type: current
+  text: Which day does Server A deploy in staging?
+  plan:
+    entity: Server A
+    attribute: deploy_day
+    context:
+      env: staging
+    intent: current
+  expect:
+    value: wednesday
+    forbidden:
+    - friday
+- id: q2
+  type: current
+  text: Which day does Server A deploy globally?
+  plan:
+    entity: Server A
+    attribute: deploy_day
+    intent: current
+  expect:
+    value: friday
+    forbidden:
+    - wednesday
+- id: q3
+  type: current
+  text: Which day does Server A deploy in production?
+  plan:
+    entity: Server A
+    attribute: deploy_day
+    context:
+      env: production
+    intent: current
+  expect:
+    value: friday
+    forbidden:
+    - wednesday

@@ -1,0 +1,62 @@
+id: context-002
+category: context_isolation
+description: Regional environments use different OS releases for Server A.
+now: '2026-06-25T09:00:00Z'
+messages:
+- id: m1
+  t: '2026-02-01T10:00:00Z'
+  source: sysadmin_priya
+  text: Server A in us-east is running Ubuntu 24.04 LTS.
+- id: m2
+  t: '2026-02-05T14:00:00Z'
+  source: sysadmin_priya
+  text: Server A in eu-central is running Debian 12.
+structured_claims:
+  m1:
+  - subject: Server A
+    attribute: os_release
+    value: ubuntu 24.04 lts
+    context:
+      region: us-east
+    polarity: assert
+    valid_from: '2026-02-01T10:00:00Z'
+    extract_confidence: 0.95
+  m2:
+  - subject: Server A
+    attribute: os_release
+    value: debian 12
+    context:
+      region: eu-central
+    polarity: assert
+    valid_from: '2026-02-05T14:00:00Z'
+    extract_confidence: 0.95
+expected_decisions:
+  m1: R-INSERT
+  m2: R-INSERT
+questions:
+- id: q1
+  type: current
+  text: What OS release does Server A run in us-east?
+  plan:
+    entity: Server A
+    attribute: os_release
+    context:
+      region: us-east
+    intent: current
+  expect:
+    value: ubuntu 24.04 lts
+    forbidden:
+    - debian 12
+- id: q2
+  type: current
+  text: What OS release does Server A run in eu-central?
+  plan:
+    entity: Server A
+    attribute: os_release
+    context:
+      region: eu-central
+    intent: current
+  expect:
+    value: debian 12
+    forbidden:
+    - ubuntu 24.04 lts

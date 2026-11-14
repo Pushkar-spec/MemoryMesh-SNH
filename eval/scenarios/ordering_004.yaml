@@ -1,0 +1,66 @@
+id: ordering-004
+category: out_of_order
+description: Historical queries and timeline remain correct after delayed claim arrival.
+now: '2026-06-25T09:00:00Z'
+messages:
+- id: m1
+  t: '2026-06-01T09:00:00Z'
+  source: sysadmin_priya
+  text: Server A deploys happen on Monday.
+- id: m2
+  t: '2026-06-15T15:00:00Z'
+  source: sysadmin_priya
+  text: 'Historical log: in January, Server A deploys were on Friday.'
+structured_claims:
+  m1:
+  - subject: Server A
+    attribute: deploy_day
+    value: monday
+    polarity: assert
+    valid_from: '2026-06-01T00:00:00Z'
+    extract_confidence: 0.95
+  m2:
+  - subject: Server A
+    attribute: deploy_day
+    value: friday
+    polarity: assert
+    valid_from: '2026-01-01T00:00:00Z'
+    extract_confidence: 0.95
+expected_decisions:
+  m1: R-INSERT
+  m2: R-BACKFILL
+questions:
+- id: q1
+  type: current
+  text: Which day does Server A deploy?
+  plan:
+    entity: Server A
+    attribute: deploy_day
+    intent: current
+  expect:
+    value: monday
+    forbidden:
+    - friday
+- id: q2
+  type: as_of
+  text: Which day did Server A deploy in March?
+  plan:
+    entity: Server A
+    attribute: deploy_day
+    valid_at: '2026-03-01T00:00:00Z'
+    intent: as_of
+  expect:
+    value: friday
+    forbidden:
+    - monday
+- id: q3
+  type: history
+  text: Which deploy days has Server A had?
+  plan:
+    entity: Server A
+    attribute: deploy_day
+    intent: history
+  expect:
+    values:
+    - friday
+    - monday

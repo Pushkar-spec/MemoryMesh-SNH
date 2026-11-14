@@ -1,0 +1,55 @@
+id: temporal-003
+category: historical_time_travel
+description: Bitemporal query combining independent valid-time and transaction-time
+  coordinates.
+now: '2026-06-25T09:00:00Z'
+messages:
+- id: m1
+  t: '2026-01-10T09:00:00Z'
+  source: ci_monitor
+  text: Server A service status is degraded.
+- id: m2
+  t: '2026-06-01T09:00:00Z'
+  source: ci_monitor
+  text: Server A service status is up.
+structured_claims:
+  m1:
+  - subject: Server A
+    attribute: service_status
+    value: degraded
+    polarity: assert
+    valid_from: '2026-01-10T09:00:00Z'
+    extract_confidence: 0.95
+  m2:
+  - subject: Server A
+    attribute: service_status
+    value: up
+    polarity: assert
+    valid_from: '2026-06-01T09:00:00Z'
+    extract_confidence: 0.95
+expected_decisions:
+  m1: R-INSERT
+  m2: R-REPLACE
+questions:
+- id: q1
+  type: as_of
+  text: What was believed in February about status in January?
+  plan:
+    entity: Server A
+    attribute: service_status
+    valid_at: '2026-01-15T00:00:00Z'
+    known_at: '2026-02-01T00:00:00Z'
+    intent: as_of
+  expect:
+    value: degraded
+- id: q2
+  type: as_of
+  text: What is believed in June about status in June?
+  plan:
+    entity: Server A
+    attribute: service_status
+    valid_at: '2026-06-15T00:00:00Z'
+    known_at: '2026-06-25T00:00:00Z'
+    intent: as_of
+  expect:
+    value: up

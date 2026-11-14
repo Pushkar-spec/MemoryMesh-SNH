@@ -1,0 +1,99 @@
+id: dependency-004
+category: dependency_propagation
+description: >-
+  Dependency propagation with mutual entity dependencies. Note on data model limitation:
+  Supported sequential claim ingestion creates strictly acyclic memory DAGs because each
+  new memory record ID is strictly greater than any pre-existing foundation target (src > dst).
+  Demonstrated memory-level directed edge cycles and cycle termination are explicitly
+  verified in tests/test_p83_scenarios.py::test_p83_dependency_cycle_propagation_proven.
+now: '2026-06-25T09:00:00Z'
+messages:
+- id: m1
+  t: '2026-01-10T09:00:00Z'
+  source: sysadmin_priya
+  text: Server A runs service auth-service.
+- id: m2
+  t: '2026-01-15T10:00:00Z'
+  source: sysadmin_priya
+  text: Server B runs api-gateway depending on Server A.
+- id: m3
+  t: '2026-02-01T11:00:00Z'
+  source: sysadmin_priya
+  text: Server A runs redis-cache depending on Server B.
+- id: m4
+  t: '2026-03-01T09:00:00Z'
+  source: sysadmin_priya
+  text: Server A auth-service is decommissioned.
+structured_claims:
+  m1:
+  - subject: Server A
+    attribute: runs_service
+    value: auth-service
+    polarity: assert
+    valid_from: '2026-01-10T09:00:00Z'
+    extract_confidence: 0.95
+  m2:
+  - subject: Server B
+    attribute: runs_service
+    value: api-gateway
+    depends_on:
+    - entity: Server A
+      attribute: runs_service
+    polarity: assert
+    valid_from: '2026-01-15T10:00:00Z'
+    extract_confidence: 0.95
+  m3:
+  - subject: Server A
+    attribute: runs_service
+    value: redis-cache
+    depends_on:
+    - entity: Server B
+      attribute: runs_service
+    polarity: assert
+    valid_from: '2026-02-01T11:00:00Z'
+    extract_confidence: 0.95
+  m4:
+  - subject: Server A
+    attribute: runs_service
+    value: auth-service
+    polarity: retract
+    valid_from: '2026-03-01T09:00:00Z'
+    extract_confidence: 0.95
+expected_decisions:
+  m1: R-INSERT
+  m2: R-INSERT
+  m3: R-COEXIST
+  m4: R-RETRACT
+questions:
+- id: q1
+  type: current
+  text: What service does Server B run?
+  plan:
+    entity: Server B
+    attribute: runs_service
+    intent: current
+  expect:
+    value: api-gateway
+    needs_review_flagged: true
+- id: q2
+  type: current
+  text: What services does Server A run?
+  plan:
+    entity: Server A
+    attribute: runs_service
+    intent: current
+  expect:
+    value: redis-cache
+    needs_review_flagged: true
+- id: q3
+  type: impact
+  text: What is the dependency impact if Server B services change?
+  plan:
+    entity: Server B
+    attribute: runs_service
+    intent: impact
+  expect:
+    dependents:
+    - - Server A
+      - runs_service
+    needs_review_flagged: true
