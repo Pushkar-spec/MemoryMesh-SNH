@@ -1,0 +1,57 @@
+id: reject-001
+category: low_trust_reject
+description: "Authoritative Python 3.12 from admin is protected against unverified Python 3.9 intern rumor."
+now: "2026-06-25T09:00:00Z"
+messages:
+  - id: m1
+    t: "2026-06-01T08:00:00Z"
+    source: sysadmin_priya
+    text: "Server A runs Python 3.12."
+  - id: m2
+    t: "2026-06-03T16:20:00Z"
+    source: intern_chat
+    text: "I think Server A was downgraded to Python 3.9?"
+structured_claims:
+  m1:
+    - subject: "Server A"
+      attribute: "python_version"
+      value: "3.12"
+      polarity: "assert"
+      valid_from: "2026-06-01T08:00:00Z"
+      extract_confidence: 0.95
+  m2:
+    - subject: "Server A"
+      attribute: "python_version"
+      value: "3.9"
+      polarity: "assert"
+      valid_from: "2026-06-03T16:20:00Z"
+      extract_confidence: 0.70
+expected_decisions:
+  m1: "R-INSERT"
+  m2: "R-REJECT"
+questions:
+  - id: "q1"
+    type: "current"
+    text: "What Python version is on Server A?"
+    plan:
+      entity: "Server A"
+      attribute: "python_version"
+      intent: "current"
+      temporal_intent: "current"
+      query_type: "fact_lookup"
+    expect:
+      value: "3.12"
+      forbidden: ["3.9"]
+  - id: "q2"
+    type: "why"
+    text: "Why do you believe Server A runs Python 3.12?"
+    plan:
+      entity: "Server A"
+      attribute: "python_version"
+      intent: "why"
+      temporal_intent: "current"
+      query_type: "explanation"
+    expect:
+      cited_source: "sysadmin_priya"
+      rule_id: "R-INSERT"
+

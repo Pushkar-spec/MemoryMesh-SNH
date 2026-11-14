@@ -1,0 +1,69 @@
+id: update-002
+category: simple_update
+description: "Authoritative operating system release migration on Server A from Ubuntu 22.04 to Debian 12."
+now: "2026-08-01T12:00:00Z"
+messages:
+  - id: m1
+    t: "2026-01-20T09:00:00Z"
+    source: sysadmin_priya
+    text: "Server A is on Ubuntu 22.04."
+  - id: m2
+    t: "2026-07-10T14:00:00Z"
+    source: sysadmin_priya
+    text: "Server A has been migrated to Debian 12."
+structured_claims:
+  m1:
+    - subject: "Server A"
+      attribute: "os_release"
+      value: "ubuntu 22.04"
+      polarity: "assert"
+      valid_from: "2026-01-20T09:00:00Z"
+      extract_confidence: 0.95
+  m2:
+    - subject: "Server A"
+      attribute: "os_release"
+      value: "debian 12"
+      previous_value: "ubuntu 22.04"
+      polarity: "assert"
+      valid_from: "2026-07-10T14:00:00Z"
+      extract_confidence: 0.95
+expected_decisions:
+  m1: "R-INSERT"
+  m2: "R-REPLACE"
+questions:
+  - id: "q1"
+    type: "current"
+    text: "What OS release is Server A running?"
+    plan:
+      entity: "Server A"
+      attribute: "os_release"
+      intent: "current"
+      temporal_intent: "current"
+      query_type: "fact_lookup"
+    expect:
+      value: "debian 12"
+      forbidden: ["ubuntu 22.04"]
+  - id: "q2"
+    type: "as_of"
+    text: "What OS was Server A running in April?"
+    plan:
+      entity: "Server A"
+      attribute: "os_release"
+      intent: "as_of"
+      temporal_intent: "as_of"
+      query_type: "fact_lookup"
+      valid_at: "2026-04-15T00:00:00Z"
+    expect:
+      value: "ubuntu 22.04"
+      forbidden: ["debian 12"]
+  - id: "q3"
+    type: "history"
+    text: "What OS releases has Server A used?"
+    plan:
+      entity: "Server A"
+      attribute: "os_release"
+      intent: "history"
+      temporal_intent: "history"
+      query_type: "timeline_history"
+    expect:
+      values: ["ubuntu 22.04", "debian 12"]

@@ -1,0 +1,56 @@
+id: corroborate-003
+category: corroboration
+description: "Admin reports deploy day Wednesday on Server A, corroborated by CI monitor."
+now: "2026-06-25T09:00:00Z"
+messages:
+  - id: m1
+    t: "2026-02-01T09:00:00Z"
+    source: sysadmin_priya
+    text: "Deploys for Server A occur on Wednesday."
+  - id: m2
+    t: "2026-02-05T10:00:00Z"
+    source: ci_monitor
+    text: "Weekly deployment pipeline for Server A is active on Wednesday."
+structured_claims:
+  m1:
+    - subject: "Server A"
+      attribute: "deploy_day"
+      value: "wednesday"
+      polarity: "assert"
+      valid_from: "2026-02-01T09:00:00Z"
+      extract_confidence: 0.95
+  m2:
+    - subject: "Server A"
+      attribute: "deploy_day"
+      value: "wednesday"
+      polarity: "assert"
+      valid_from: "2026-02-05T10:00:00Z"
+      extract_confidence: 0.90
+expected_decisions:
+  m1: "R-INSERT"
+  m2: "R-CORROBORATE"
+questions:
+  - id: "q1"
+    type: "current"
+    text: "Which day of the week does Server A deploy?"
+    plan:
+      entity: "Server A"
+      attribute: "deploy_day"
+      intent: "current"
+      temporal_intent: "current"
+      query_type: "fact_lookup"
+    expect:
+      value: "wednesday"
+  - id: "q2"
+    type: "why"
+    text: "Why do you believe Server A deploys on Wednesday?"
+    plan:
+      entity: "Server A"
+      attribute: "deploy_day"
+      intent: "why"
+      temporal_intent: "current"
+      query_type: "explanation"
+    expect:
+      cited_source: "sysadmin_priya"
+      rule_id: "R-CORROBORATE"
+

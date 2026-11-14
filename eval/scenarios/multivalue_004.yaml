@@ -1,0 +1,69 @@
+id: multivalue-004
+category: multi_valued
+description: "Sequential service additions on Server A across multiple sources with as-of query testing."
+now: "2026-06-25T09:00:00Z"
+messages:
+  - id: m1
+    t: "2026-03-01T09:00:00Z"
+    source: sysadmin_priya
+    text: "Server A runs ingestion-pipeline."
+  - id: m2
+    t: "2026-03-05T10:00:00Z"
+    source: ci_monitor
+    text: "Server A runs log-shipper."
+  - id: m3
+    t: "2026-03-10T11:00:00Z"
+    source: wiki
+    text: "Server A runs cron-scheduler."
+structured_claims:
+  m1:
+    - subject: "Server A"
+      attribute: "runs_service"
+      value: "ingestion-pipeline"
+      polarity: "assert"
+      valid_from: "2026-03-01T09:00:00Z"
+      extract_confidence: 0.95
+  m2:
+    - subject: "Server A"
+      attribute: "runs_service"
+      value: "log-shipper"
+      polarity: "assert"
+      valid_from: "2026-03-05T10:00:00Z"
+      extract_confidence: 0.90
+  m3:
+    - subject: "Server A"
+      attribute: "runs_service"
+      value: "cron-scheduler"
+      polarity: "assert"
+      valid_from: "2026-03-10T11:00:00Z"
+      extract_confidence: 0.85
+expected_decisions:
+  m1: "R-INSERT"
+  m2: "R-COEXIST"
+  m3: "R-COEXIST"
+questions:
+  - id: "q1"
+    type: "current"
+    text: "Which services run on Server A?"
+    plan:
+      entity: "Server A"
+      attribute: "runs_service"
+      intent: "current"
+      temporal_intent: "current"
+      query_type: "fact_lookup"
+    expect:
+      values: ["cron-scheduler", "ingestion-pipeline", "log-shipper"]
+  - id: "q2"
+    type: "as_of"
+    text: "Which services ran on Server A on March 3rd?"
+    plan:
+      entity: "Server A"
+      attribute: "runs_service"
+      intent: "as_of"
+      temporal_intent: "as_of"
+      query_type: "fact_lookup"
+      valid_at: "2026-03-03T00:00:00Z"
+    expect:
+      values: ["ingestion-pipeline"]
+      forbidden: ["log-shipper", "cron-scheduler"]
+

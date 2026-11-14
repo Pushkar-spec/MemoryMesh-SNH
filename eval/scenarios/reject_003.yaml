@@ -1,0 +1,57 @@
+id: reject-003
+category: low_trust_reject
+description: "Authoritative Friday deploy day established by admin is preserved against Sunday rumor."
+now: "2026-06-25T09:00:00Z"
+messages:
+  - id: m1
+    t: "2026-02-10T10:00:00Z"
+    source: sysadmin_priya
+    text: "Server A deploys happen on Fridays."
+  - id: m2
+    t: "2026-02-12T16:00:00Z"
+    source: intern_chat
+    text: "Aren't Server A deploys happening on Sunday?"
+structured_claims:
+  m1:
+    - subject: "Server A"
+      attribute: "deploy_day"
+      value: "friday"
+      polarity: "assert"
+      valid_from: "2026-02-10T10:00:00Z"
+      extract_confidence: 0.95
+  m2:
+    - subject: "Server A"
+      attribute: "deploy_day"
+      value: "sunday"
+      polarity: "assert"
+      valid_from: "2026-02-12T16:00:00Z"
+      extract_confidence: 0.70
+expected_decisions:
+  m1: "R-INSERT"
+  m2: "R-REJECT"
+questions:
+  - id: "q1"
+    type: "current"
+    text: "Which day does Server A deploy?"
+    plan:
+      entity: "Server A"
+      attribute: "deploy_day"
+      intent: "current"
+      temporal_intent: "current"
+      query_type: "fact_lookup"
+    expect:
+      value: "friday"
+      forbidden: ["sunday"]
+  - id: "q2"
+    type: "why"
+    text: "Why is Friday the deploy day for Server A?"
+    plan:
+      entity: "Server A"
+      attribute: "deploy_day"
+      intent: "why"
+      temporal_intent: "current"
+      query_type: "explanation"
+    expect:
+      cited_source: "sysadmin_priya"
+      rule_id: "R-INSERT"
+

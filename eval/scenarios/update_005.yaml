@@ -1,0 +1,70 @@
+id: update-005
+category: simple_update
+description: "Operational status transition from degraded to up following maintenance."
+now: "2026-09-05T00:00:00Z"
+messages:
+  - id: m1
+    t: "2026-09-01T08:00:00Z"
+    source: ci_monitor
+    text: "Server A status is degraded due to high load."
+  - id: m2
+    t: "2026-09-02T10:00:00Z"
+    source: sysadmin_priya
+    text: "Server A is now fully up after maintenance."
+structured_claims:
+  m1:
+    - subject: "Server A"
+      attribute: "service_status"
+      value: "degraded"
+      polarity: "assert"
+      valid_from: "2026-09-01T08:00:00Z"
+      extract_confidence: 0.90
+  m2:
+    - subject: "Server A"
+      attribute: "service_status"
+      value: "up"
+      previous_value: "degraded"
+      polarity: "assert"
+      valid_from: "2026-09-02T10:00:00Z"
+      extract_confidence: 0.95
+expected_decisions:
+  m1: "R-INSERT"
+  m2: "R-REPLACE"
+questions:
+  - id: "q1"
+    type: "current"
+    text: "What is the operational status of Server A?"
+    plan:
+      entity: "Server A"
+      attribute: "service_status"
+      intent: "current"
+      temporal_intent: "current"
+      query_type: "fact_lookup"
+    expect:
+      value: "up"
+      forbidden: ["degraded"]
+  - id: "q2"
+    type: "as_of"
+    text: "What was Server A status on September 1st at noon?"
+    plan:
+      entity: "Server A"
+      attribute: "service_status"
+      intent: "as_of"
+      temporal_intent: "as_of"
+      query_type: "fact_lookup"
+      valid_at: "2026-09-01T12:00:00Z"
+    expect:
+      value: "degraded"
+      forbidden: ["up"]
+  - id: "q3"
+    type: "history"
+    text: "What is the status history of Server A?"
+    plan:
+      entity: "Server A"
+      attribute: "service_status"
+      intent: "history"
+      temporal_intent: "history"
+      query_type: "timeline_history"
+    expect:
+      values: ["degraded", "up"]
+

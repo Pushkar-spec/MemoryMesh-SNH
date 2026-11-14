@@ -1,0 +1,70 @@
+id: update-003
+category: simple_update
+description: "Ownership team transfer for Server A from infra team to core platform team."
+now: "2026-09-01T10:00:00Z"
+messages:
+  - id: m1
+    t: "2026-02-01T10:00:00Z"
+    source: sysadmin_priya
+    text: "Server A is maintained by the infra team."
+  - id: m2
+    t: "2026-08-15T11:00:00Z"
+    source: sysadmin_priya
+    text: "Ownership of Server A was transferred to the core platform team."
+structured_claims:
+  m1:
+    - subject: "Server A"
+      attribute: "owner_team"
+      value: "infra team"
+      polarity: "assert"
+      valid_from: "2026-02-01T10:00:00Z"
+      extract_confidence: 0.95
+  m2:
+    - subject: "Server A"
+      attribute: "owner_team"
+      value: "core platform team"
+      previous_value: "infra team"
+      polarity: "assert"
+      valid_from: "2026-08-15T11:00:00Z"
+      extract_confidence: 0.95
+expected_decisions:
+  m1: "R-INSERT"
+  m2: "R-REPLACE"
+questions:
+  - id: "q1"
+    type: "current"
+    text: "Which team owns Server A?"
+    plan:
+      entity: "Server A"
+      attribute: "owner_team"
+      intent: "current"
+      temporal_intent: "current"
+      query_type: "fact_lookup"
+    expect:
+      value: "core platform team"
+      forbidden: ["infra team"]
+  - id: "q2"
+    type: "as_of"
+    text: "Which team owned Server A in May?"
+    plan:
+      entity: "Server A"
+      attribute: "owner_team"
+      intent: "as_of"
+      temporal_intent: "as_of"
+      query_type: "fact_lookup"
+      valid_at: "2026-05-01T00:00:00Z"
+    expect:
+      value: "infra team"
+      forbidden: ["core platform team"]
+  - id: "q3"
+    type: "history"
+    text: "What teams have owned Server A?"
+    plan:
+      entity: "Server A"
+      attribute: "owner_team"
+      intent: "history"
+      temporal_intent: "history"
+      query_type: "timeline_history"
+    expect:
+      values: ["infra team", "core platform team"]
+

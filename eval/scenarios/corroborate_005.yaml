@@ -1,0 +1,79 @@
+id: corroborate-005
+category: corroboration
+description: "Triple corroboration of Server A owner team across Priya, CI monitor, and Wiki."
+now: "2026-06-25T09:00:00Z"
+messages:
+  - id: m1
+    t: "2026-04-01T09:00:00Z"
+    source: sysadmin_priya
+    text: "Server A owner team is SRE core."
+  - id: m2
+    t: "2026-04-02T10:00:00Z"
+    source: ci_monitor
+    text: "Alert routing for Server A configured for SRE core."
+  - id: m3
+    t: "2026-04-05T11:00:00Z"
+    source: wiki
+    text: "Server A catalog page lists owner as SRE core."
+structured_claims:
+  m1:
+    - subject: "Server A"
+      attribute: "owner_team"
+      value: "sre core"
+      polarity: "assert"
+      valid_from: "2026-04-01T09:00:00Z"
+      extract_confidence: 0.95
+  m2:
+    - subject: "Server A"
+      attribute: "owner_team"
+      value: "sre core"
+      polarity: "assert"
+      valid_from: "2026-04-02T10:00:00Z"
+      extract_confidence: 0.90
+  m3:
+    - subject: "Server A"
+      attribute: "owner_team"
+      value: "sre core"
+      polarity: "assert"
+      valid_from: "2026-04-05T11:00:00Z"
+      extract_confidence: 0.85
+expected_decisions:
+  m1: "R-INSERT"
+  m2: "R-CORROBORATE"
+  m3: "R-CORROBORATE"
+questions:
+  - id: "q1"
+    type: "current"
+    text: "Which team owns Server A?"
+    plan:
+      entity: "Server A"
+      attribute: "owner_team"
+      intent: "current"
+      temporal_intent: "current"
+      query_type: "fact_lookup"
+    expect:
+      value: "sre core"
+  - id: "q2"
+    type: "history"
+    text: "What is the ownership history of Server A?"
+    plan:
+      entity: "Server A"
+      attribute: "owner_team"
+      intent: "history"
+      temporal_intent: "history"
+      query_type: "timeline_history"
+    expect:
+      values: ["sre core"]
+  - id: "q3"
+    type: "why"
+    text: "Why do you believe Server A is owned by SRE core?"
+    plan:
+      entity: "Server A"
+      attribute: "owner_team"
+      intent: "why"
+      temporal_intent: "current"
+      query_type: "explanation"
+    expect:
+      cited_source: "sysadmin_priya"
+      rule_id: "R-CORROBORATE"
+

@@ -1,0 +1,56 @@
+id: multivalue-003
+category: multi_valued
+description: "Server A hosts redis-cache and search-indexer with independent corroboration of redis-cache."
+now: "2026-06-25T09:00:00Z"
+messages:
+  - id: m1
+    t: "2026-02-01T09:00:00Z"
+    source: sysadmin_priya
+    text: "Server A runs redis-cache."
+  - id: m2
+    t: "2026-02-05T10:00:00Z"
+    source: sysadmin_priya
+    text: "Server A runs search-indexer."
+  - id: m3
+    t: "2026-02-10T12:00:00Z"
+    source: wiki
+    text: "Documentation confirms Server A runs redis-cache."
+structured_claims:
+  m1:
+    - subject: "Server A"
+      attribute: "runs_service"
+      value: "redis-cache"
+      polarity: "assert"
+      valid_from: "2026-02-01T09:00:00Z"
+      extract_confidence: 0.95
+  m2:
+    - subject: "Server A"
+      attribute: "runs_service"
+      value: "search-indexer"
+      polarity: "assert"
+      valid_from: "2026-02-05T10:00:00Z"
+      extract_confidence: 0.95
+  m3:
+    - subject: "Server A"
+      attribute: "runs_service"
+      value: "redis-cache"
+      polarity: "assert"
+      valid_from: "2026-02-10T12:00:00Z"
+      extract_confidence: 0.85
+expected_decisions:
+  m1: "R-INSERT"
+  m2: "R-COEXIST"
+  m3: "R-CORROBORATE"
+questions:
+  - id: "q1"
+    type: "current"
+    text: "Which services run on Server A?"
+    plan:
+      entity: "Server A"
+      attribute: "runs_service"
+      intent: "current"
+      temporal_intent: "current"
+      query_type: "fact_lookup"
+    expect:
+      values: ["redis-cache", "search-indexer"]
+

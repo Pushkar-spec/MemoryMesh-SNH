@@ -1,0 +1,56 @@
+id: dispute-004
+category: dispute
+description: "Credible dispute between Wiki (maintenance) and Dev Chat (degraded) on service status."
+now: "2026-06-25T09:00:00Z"
+messages:
+  - id: m1
+    t: "2026-05-01T10:00:00Z"
+    source: wiki
+    text: "Server A is in maintenance status."
+  - id: m2
+    t: "2026-05-01T11:00:00Z"
+    source: dev_chat
+    text: "Server A is degraded due to memory pressure."
+structured_claims:
+  m1:
+    - subject: "Server A"
+      attribute: "service_status"
+      value: "maintenance"
+      polarity: "assert"
+      valid_from: "2026-05-01T10:00:00Z"
+      extract_confidence: 0.80
+  m2:
+    - subject: "Server A"
+      attribute: "service_status"
+      value: "degraded"
+      polarity: "assert"
+      valid_from: "2026-05-01T11:00:00Z"
+      extract_confidence: 0.80
+expected_decisions:
+  m1: "R-INSERT"
+  m2: "R-DISPUTE"
+questions:
+  - id: "q1"
+    type: "current"
+    text: "What is the operational status of Server A?"
+    plan:
+      entity: "Server A"
+      attribute: "service_status"
+      intent: "current"
+      temporal_intent: "current"
+      query_type: "fact_lookup"
+    expect:
+      conflict_flagged: true
+      values: ["degraded", "maintenance"]
+  - id: "q2"
+    type: "why"
+    text: "Why is the status of Server A disputed?"
+    plan:
+      entity: "Server A"
+      attribute: "service_status"
+      intent: "why"
+      temporal_intent: "current"
+      query_type: "explanation"
+    expect:
+      conflict_flagged: true
+      rule_id: "R-DISPUTE"

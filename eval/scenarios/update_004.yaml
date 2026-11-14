@@ -1,0 +1,70 @@
+id: update-004
+category: simple_update
+description: "Deploy weekday change from thursday to tuesday on Server A."
+now: "2026-07-01T09:00:00Z"
+messages:
+  - id: m1
+    t: "2026-01-10T09:00:00Z"
+    source: sysadmin_priya
+    text: "Deploys for Server A are scheduled for Thursday."
+  - id: m2
+    t: "2026-05-20T10:00:00Z"
+    source: sysadmin_priya
+    text: "Server A deploys have been moved to Tuesday."
+structured_claims:
+  m1:
+    - subject: "Server A"
+      attribute: "deploy_day"
+      value: "thursday"
+      polarity: "assert"
+      valid_from: "2026-01-10T09:00:00Z"
+      extract_confidence: 0.95
+  m2:
+    - subject: "Server A"
+      attribute: "deploy_day"
+      value: "tuesday"
+      previous_value: "thursday"
+      polarity: "assert"
+      valid_from: "2026-05-20T10:00:00Z"
+      extract_confidence: 0.95
+expected_decisions:
+  m1: "R-INSERT"
+  m2: "R-REPLACE"
+questions:
+  - id: "q1"
+    type: "current"
+    text: "What day does Server A deploy?"
+    plan:
+      entity: "Server A"
+      attribute: "deploy_day"
+      intent: "current"
+      temporal_intent: "current"
+      query_type: "fact_lookup"
+    expect:
+      value: "tuesday"
+      forbidden: ["thursday"]
+  - id: "q2"
+    type: "as_of"
+    text: "What day did Server A deploy in March?"
+    plan:
+      entity: "Server A"
+      attribute: "deploy_day"
+      intent: "as_of"
+      temporal_intent: "as_of"
+      query_type: "fact_lookup"
+      valid_at: "2026-03-01T00:00:00Z"
+    expect:
+      value: "thursday"
+      forbidden: ["tuesday"]
+  - id: "q3"
+    type: "history"
+    text: "What deploy days has Server A had?"
+    plan:
+      entity: "Server A"
+      attribute: "deploy_day"
+      intent: "history"
+      temporal_intent: "history"
+      query_type: "timeline_history"
+    expect:
+      values: ["thursday", "tuesday"]
+

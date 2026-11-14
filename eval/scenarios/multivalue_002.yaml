@@ -1,0 +1,56 @@
+id: multivalue-002
+category: multi_valued
+description: "Server A hosts three distinct services (billing-worker, notification-service, metrics-agent) simultaneously."
+now: "2026-06-25T09:00:00Z"
+messages:
+  - id: m1
+    t: "2026-01-10T09:00:00Z"
+    source: sysadmin_priya
+    text: "Server A hosts billing-worker."
+  - id: m2
+    t: "2026-01-12T10:00:00Z"
+    source: sysadmin_priya
+    text: "Server A hosts notification-service."
+  - id: m3
+    t: "2026-01-15T14:00:00Z"
+    source: ci_monitor
+    text: "Server A hosts metrics-agent."
+structured_claims:
+  m1:
+    - subject: "Server A"
+      attribute: "runs_service"
+      value: "billing-worker"
+      polarity: "assert"
+      valid_from: "2026-01-10T09:00:00Z"
+      extract_confidence: 0.95
+  m2:
+    - subject: "Server A"
+      attribute: "runs_service"
+      value: "notification-service"
+      polarity: "assert"
+      valid_from: "2026-01-12T10:00:00Z"
+      extract_confidence: 0.95
+  m3:
+    - subject: "Server A"
+      attribute: "runs_service"
+      value: "metrics-agent"
+      polarity: "assert"
+      valid_from: "2026-01-15T14:00:00Z"
+      extract_confidence: 0.90
+expected_decisions:
+  m1: "R-INSERT"
+  m2: "R-COEXIST"
+  m3: "R-COEXIST"
+questions:
+  - id: "q1"
+    type: "current"
+    text: "Which services run on Server A?"
+    plan:
+      entity: "Server A"
+      attribute: "runs_service"
+      intent: "current"
+      temporal_intent: "current"
+      query_type: "fact_lookup"
+    expect:
+      values: ["billing-worker", "metrics-agent", "notification-service"]
+

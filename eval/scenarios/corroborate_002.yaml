@@ -1,0 +1,56 @@
+id: corroborate-002
+category: corroboration
+description: "Admin reports OS release Ubuntu 24.04 LTS on Server A, confirmed by Wiki."
+now: "2026-06-25T09:00:00Z"
+messages:
+  - id: m1
+    t: "2026-01-15T09:00:00Z"
+    source: sysadmin_priya
+    text: "Server A runs Ubuntu 24.04 LTS."
+  - id: m2
+    t: "2026-01-20T11:00:00Z"
+    source: wiki
+    text: "Infrastructure inventory lists Server A OS as Ubuntu 24.04 LTS."
+structured_claims:
+  m1:
+    - subject: "Server A"
+      attribute: "os_release"
+      value: "ubuntu 24.04 lts"
+      polarity: "assert"
+      valid_from: "2026-01-15T09:00:00Z"
+      extract_confidence: 0.95
+  m2:
+    - subject: "Server A"
+      attribute: "os_release"
+      value: "ubuntu 24.04 lts"
+      polarity: "assert"
+      valid_from: "2026-01-20T11:00:00Z"
+      extract_confidence: 0.90
+expected_decisions:
+  m1: "R-INSERT"
+  m2: "R-CORROBORATE"
+questions:
+  - id: "q1"
+    type: "current"
+    text: "What OS release is Server A running?"
+    plan:
+      entity: "Server A"
+      attribute: "os_release"
+      intent: "current"
+      temporal_intent: "current"
+      query_type: "fact_lookup"
+    expect:
+      value: "ubuntu 24.04 lts"
+  - id: "q2"
+    type: "why"
+    text: "Why do you believe Server A runs Ubuntu 24.04 LTS?"
+    plan:
+      entity: "Server A"
+      attribute: "os_release"
+      intent: "why"
+      temporal_intent: "current"
+      query_type: "explanation"
+    expect:
+      cited_source: "sysadmin_priya"
+      rule_id: "R-CORROBORATE"
+

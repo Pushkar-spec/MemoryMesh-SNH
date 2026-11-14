@@ -1,0 +1,56 @@
+id: dispute-003
+category: dispute
+description: "Credible dispute between Wiki (Data Engineering) and Dev Chat (Platform Ops) on owner team."
+now: "2026-06-25T09:00:00Z"
+messages:
+  - id: m1
+    t: "2026-04-01T10:00:00Z"
+    source: wiki
+    text: "Server A is owned by Data Engineering."
+  - id: m2
+    t: "2026-04-10T12:00:00Z"
+    source: dev_chat
+    text: "Server A is owned by Platform Ops."
+structured_claims:
+  m1:
+    - subject: "Server A"
+      attribute: "owner_team"
+      value: "data engineering"
+      polarity: "assert"
+      valid_from: "2026-04-01T10:00:00Z"
+      extract_confidence: 0.80
+  m2:
+    - subject: "Server A"
+      attribute: "owner_team"
+      value: "platform ops"
+      polarity: "assert"
+      valid_from: "2026-04-10T12:00:00Z"
+      extract_confidence: 0.80
+expected_decisions:
+  m1: "R-INSERT"
+  m2: "R-DISPUTE"
+questions:
+  - id: "q1"
+    type: "current"
+    text: "Which team owns Server A?"
+    plan:
+      entity: "Server A"
+      attribute: "owner_team"
+      intent: "current"
+      temporal_intent: "current"
+      query_type: "fact_lookup"
+    expect:
+      conflict_flagged: true
+      values: ["data engineering", "platform ops"]
+  - id: "q2"
+    type: "why"
+    text: "Why is ownership of Server A disputed?"
+    plan:
+      entity: "Server A"
+      attribute: "owner_team"
+      intent: "why"
+      temporal_intent: "current"
+      query_type: "explanation"
+    expect:
+      conflict_flagged: true
+      rule_id: "R-DISPUTE"

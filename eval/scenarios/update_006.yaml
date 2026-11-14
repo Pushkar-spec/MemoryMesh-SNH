@@ -1,0 +1,96 @@
+id: update-006
+category: simple_update
+description: "Three-stage runtime progression on Server A from Python 3.9 to 3.10 and then to 3.12."
+now: "2026-06-01T12:00:00Z"
+messages:
+  - id: m1
+    t: "2025-01-01T09:00:00Z"
+    source: sysadmin_priya
+    text: "Server A runs Python 3.9."
+  - id: m2
+    t: "2025-08-01T09:00:00Z"
+    source: sysadmin_priya
+    text: "Server A migrated to Python 3.10."
+  - id: m3
+    t: "2026-03-01T09:00:00Z"
+    source: sysadmin_priya
+    text: "Server A migrated to Python 3.12."
+structured_claims:
+  m1:
+    - subject: "Server A"
+      attribute: "python_version"
+      value: "3.9"
+      polarity: "assert"
+      valid_from: "2025-01-01T09:00:00Z"
+      extract_confidence: 0.95
+  m2:
+    - subject: "Server A"
+      attribute: "python_version"
+      value: "3.10"
+      previous_value: "3.9"
+      polarity: "assert"
+      valid_from: "2025-08-01T09:00:00Z"
+      extract_confidence: 0.95
+  m3:
+    - subject: "Server A"
+      attribute: "python_version"
+      value: "3.12"
+      previous_value: "3.10"
+      polarity: "assert"
+      valid_from: "2026-03-01T09:00:00Z"
+      extract_confidence: 0.95
+expected_decisions:
+  m1: "R-INSERT"
+  m2: "R-REPLACE"
+  m3: "R-REPLACE"
+questions:
+  - id: "q1"
+    type: "current"
+    text: "What Python version is currently on Server A?"
+    plan:
+      entity: "Server A"
+      attribute: "python_version"
+      intent: "current"
+      temporal_intent: "current"
+      query_type: "fact_lookup"
+    expect:
+      value: "3.12"
+      forbidden: ["3.9", "3.10"]
+  - id: "q2"
+    type: "as_of"
+    text: "What Python version did Server A run in May 2025?"
+    plan:
+      entity: "Server A"
+      attribute: "python_version"
+      intent: "as_of"
+      temporal_intent: "as_of"
+      query_type: "fact_lookup"
+      valid_at: "2025-05-01T00:00:00Z"
+    expect:
+      value: "3.9"
+      forbidden: ["3.10", "3.12"]
+  - id: "q3"
+    type: "as_of"
+    text: "What Python version did Server A run in October 2025?"
+    plan:
+      entity: "Server A"
+      attribute: "python_version"
+      intent: "as_of"
+      temporal_intent: "as_of"
+      query_type: "fact_lookup"
+      valid_at: "2025-10-01T00:00:00Z"
+    expect:
+      value: "3.10"
+      forbidden: ["3.9", "3.12"]
+  - id: "q4"
+    type: "history"
+    text: "What is the full version history for Server A?"
+    plan:
+      entity: "Server A"
+      attribute: "python_version"
+      intent: "history"
+      temporal_intent: "history"
+      query_type: "timeline_history"
+    expect:
+      values: ["3.9", "3.10", "3.12"]
+

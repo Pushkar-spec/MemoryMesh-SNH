@@ -1,0 +1,70 @@
+id: update-001
+category: simple_update
+description: "Authoritative Python runtime upgrade from 3.10 to 3.12 on Server A."
+now: "2026-06-25T09:00:00Z"
+messages:
+  - id: m1
+    t: "2026-01-15T10:00:00Z"
+    source: sysadmin_priya
+    text: "Server A runs Python 3.10."
+  - id: m2
+    t: "2026-06-01T08:00:00Z"
+    source: sysadmin_priya
+    text: "We upgraded Server A to Python 3.12 today."
+structured_claims:
+  m1:
+    - subject: "Server A"
+      attribute: "python_version"
+      value: "3.10"
+      polarity: "assert"
+      valid_from: "2026-01-15T10:00:00Z"
+      extract_confidence: 0.95
+  m2:
+    - subject: "Server A"
+      attribute: "python_version"
+      value: "3.12"
+      previous_value: "3.10"
+      polarity: "assert"
+      valid_from: "2026-06-01T08:00:00Z"
+      extract_confidence: 0.95
+expected_decisions:
+  m1: "R-INSERT"
+  m2: "R-REPLACE"
+questions:
+  - id: "q1"
+    type: "current"
+    text: "What Python version does Server A use?"
+    plan:
+      entity: "Server A"
+      attribute: "python_version"
+      intent: "current"
+      temporal_intent: "current"
+      query_type: "fact_lookup"
+    expect:
+      value: "3.12"
+      forbidden: ["3.10"]
+  - id: "q2"
+    type: "as_of"
+    text: "What Python version did Server A use in March?"
+    plan:
+      entity: "Server A"
+      attribute: "python_version"
+      intent: "as_of"
+      temporal_intent: "as_of"
+      query_type: "fact_lookup"
+      valid_at: "2026-03-01T00:00:00Z"
+    expect:
+      value: "3.10"
+      forbidden: ["3.12"]
+  - id: "q3"
+    type: "history"
+    text: "What is the history of Python versions on Server A?"
+    plan:
+      entity: "Server A"
+      attribute: "python_version"
+      intent: "history"
+      temporal_intent: "history"
+      query_type: "timeline_history"
+    expect:
+      values: ["3.10", "3.12"]
+

@@ -1,0 +1,56 @@
+id: dispute-001
+category: dispute
+description: "Credible dispute between sysadmin Priya (Friday) and dev chat (Monday) on deploy day."
+now: "2026-06-25T09:00:00Z"
+messages:
+  - id: m1
+    t: "2026-02-10T10:00:00Z"
+    source: sysadmin_priya
+    text: "Server A deploys happen on Fridays."
+  - id: m2
+    t: "2026-06-15T10:10:00Z"
+    source: dev_chat
+    text: "FYI deploys for Server A are on Mondays now."
+structured_claims:
+  m1:
+    - subject: "Server A"
+      attribute: "deploy_day"
+      value: "friday"
+      polarity: "assert"
+      valid_from: "2026-02-10T10:00:00Z"
+      extract_confidence: 0.95
+  m2:
+    - subject: "Server A"
+      attribute: "deploy_day"
+      value: "monday"
+      polarity: "assert"
+      valid_from: "2026-06-15T10:10:00Z"
+      extract_confidence: 0.90
+expected_decisions:
+  m1: "R-INSERT"
+  m2: "R-DISPUTE"
+questions:
+  - id: "q1"
+    type: "current"
+    text: "Which day does Server A deploy?"
+    plan:
+      entity: "Server A"
+      attribute: "deploy_day"
+      intent: "current"
+      temporal_intent: "current"
+      query_type: "fact_lookup"
+    expect:
+      conflict_flagged: true
+      values: ["friday", "monday"]
+  - id: "q2"
+    type: "why"
+    text: "Why is there uncertainty about the deploy day?"
+    plan:
+      entity: "Server A"
+      attribute: "deploy_day"
+      intent: "why"
+      temporal_intent: "current"
+      query_type: "explanation"
+    expect:
+      conflict_flagged: true
+      rule_id: "R-DISPUTE"

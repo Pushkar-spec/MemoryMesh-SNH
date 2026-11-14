@@ -1,0 +1,57 @@
+id: reject-004
+category: low_trust_reject
+description: "Authoritative service status UP confirmed by CI monitor is protected against false-alarm DOWN report."
+now: "2026-06-25T09:00:00Z"
+messages:
+  - id: m1
+    t: "2026-03-01T08:00:00Z"
+    source: ci_monitor
+    text: "Server A service status is up with 100% green checks."
+  - id: m2
+    t: "2026-03-01T08:15:00Z"
+    source: intern_chat
+    text: "Server A is down, my local script failed."
+structured_claims:
+  m1:
+    - subject: "Server A"
+      attribute: "service_status"
+      value: "up"
+      polarity: "assert"
+      valid_from: "2026-03-01T08:00:00Z"
+      extract_confidence: 0.95
+  m2:
+    - subject: "Server A"
+      attribute: "service_status"
+      value: "down"
+      polarity: "assert"
+      valid_from: "2026-03-01T08:15:00Z"
+      extract_confidence: 0.60
+expected_decisions:
+  m1: "R-INSERT"
+  m2: "R-REJECT"
+questions:
+  - id: "q1"
+    type: "current"
+    text: "What is the operational status of Server A?"
+    plan:
+      entity: "Server A"
+      attribute: "service_status"
+      intent: "current"
+      temporal_intent: "current"
+      query_type: "fact_lookup"
+    expect:
+      value: "up"
+      forbidden: ["down"]
+  - id: "q2"
+    type: "why"
+    text: "Why is Server A reported as up?"
+    plan:
+      entity: "Server A"
+      attribute: "service_status"
+      intent: "why"
+      temporal_intent: "current"
+      query_type: "explanation"
+    expect:
+      cited_source: "ci_monitor"
+      rule_id: "R-INSERT"
+

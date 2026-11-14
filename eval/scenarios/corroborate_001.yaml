@@ -1,0 +1,56 @@
+id: corroborate-001
+category: corroboration
+description: "Admin reports Python 3.12 on Server A, independently confirmed by CI monitor."
+now: "2026-06-25T09:00:00Z"
+messages:
+  - id: m1
+    t: "2026-06-01T08:00:00Z"
+    source: sysadmin_priya
+    text: "Server A runs Python 3.12."
+  - id: m2
+    t: "2026-06-02T10:00:00Z"
+    source: ci_monitor
+    text: "CI telemetry verified Server A runs Python 3.12."
+structured_claims:
+  m1:
+    - subject: "Server A"
+      attribute: "python_version"
+      value: "3.12"
+      polarity: "assert"
+      valid_from: "2026-06-01T08:00:00Z"
+      extract_confidence: 0.95
+  m2:
+    - subject: "Server A"
+      attribute: "python_version"
+      value: "3.12"
+      polarity: "assert"
+      valid_from: "2026-06-02T10:00:00Z"
+      extract_confidence: 0.90
+expected_decisions:
+  m1: "R-INSERT"
+  m2: "R-CORROBORATE"
+questions:
+  - id: "q1"
+    type: "current"
+    text: "What Python version is on Server A?"
+    plan:
+      entity: "Server A"
+      attribute: "python_version"
+      intent: "current"
+      temporal_intent: "current"
+      query_type: "fact_lookup"
+    expect:
+      value: "3.12"
+  - id: "q2"
+    type: "why"
+    text: "Why do you believe Server A is on Python 3.12?"
+    plan:
+      entity: "Server A"
+      attribute: "python_version"
+      intent: "why"
+      temporal_intent: "current"
+      query_type: "explanation"
+    expect:
+      cited_source: "sysadmin_priya"
+      rule_id: "R-CORROBORATE"
+
