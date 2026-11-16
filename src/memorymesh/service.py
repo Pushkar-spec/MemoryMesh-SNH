@@ -5,9 +5,11 @@ Governed by docs/SPECIFICATION.md Section 2, docs/ARCHITECTURE.md, and docs/AGEN
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import logging
 import sqlite3
+import threading
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -58,9 +60,12 @@ from memorymesh.models import (
     Action,
     AddEdge,
     AddEvidence,
+    AskResponse,
     AskResult,
     AttributeDef,
+    BaselineHit,
     Cardinality,
+    CatalogResponse,
     Claim,
     DecisionLogEntry,
     DisputeView,
@@ -68,12 +73,16 @@ from memorymesh.models import (
     EntityTiebreakCandidate,
     EntityTiebreakResult,
     Evidence,
+    GraphEdge,
+    GraphNode,
+    GraphResponse,
     ImpactItem,
     IngestMessage,
     IngestReport,
     InsertMemory,
     InvariantReport,
     InvariantViolation,
+    LLMCallLog,
     Memory,
     MemoryStatus,
     MemoryView,
@@ -86,6 +95,7 @@ from memorymesh.models import (
     Relation,
     RelationProposal,
     ResolvedClaim,
+    SlotTimeline,
     Source,
     UpdateMemory,
     ValueType,
@@ -181,6 +191,17 @@ def _resolve_memory_placeholder(
     raise ValueError(f"Unknown memory placeholder: {ref}")
 
 
+def _locked(fn: Any) -> Any:
+    """Decorator ensuring method executes while holding self._ingest_lock."""
+
+    @functools.wraps(fn)
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        with self._ingest_lock:
+            return fn(self, *args, **kwargs)
+
+    return wrapper
+
+
 class MemoryService:
     """Core domain service orchestrating memory ingestion, resolution, and retrieval."""
 
@@ -191,6 +212,7 @@ class MemoryService:
         llm: Any | None = None,
         *,
         clock: Callable[[], datetime] | None = None,
+        check_same_thread: bool = True,
     ) -> None:
         """Initialize MemoryService with a repository, configuration, and optional clock."""
         if isinstance(db_target, Repository):
@@ -198,13 +220,22 @@ class MemoryService:
         elif isinstance(db_target, sqlite3.Connection):
             self.repo = Repository(db_target)
         else:
-            conn = init_db(db_target)
+            conn = init_db(db_target, check_same_thread=check_same_thread)
             self.repo = Repository(conn)
 
         self.cfg = cfg or load_app_config()
         self.llm = llm
         self.clock = clock or (lambda: datetime.now(UTC))
         self._llm_client_instance: Any = None
+        self._ingest_lock = threading.RLock()
+
+    def close(self) -> None:
+        """Close the underlying repository database connection if open."""
+        if hasattr(self, "repo") and hasattr(self.repo, "conn"):
+            try:
+                self.repo.conn.close()
+            except Exception:
+                pass
 
     @property
     def llm_client(self) -> Any:
@@ -459,6 +490,7 @@ class MemoryService:
             raise_on_error=raise_on_error,
         )
 
+    @_locked
     def ingest(
         self,
         message: IngestMessage,
@@ -478,93 +510,96 @@ class MemoryService:
            entity resolution, attribute definition check, normalization, relation
            classification, engine rules, atomic transaction, and decision logging.
         """
-        eff_recorded_at = recorded_at or message.event_time
+        with self._ingest_lock:
+            eff_recorded_at = recorded_at or message.event_time
 
-        # 1. Early idempotency check (avoids redundant LLM extraction for duplicate messages)
-        text_hash = hashlib.sha256(message.text.encode("utf-8")).hexdigest()
-        existing_msg_id = self.repo.get_message_by_hash(
-            message.source_id, text_hash, message.event_time
-        )
-        if existing_msg_id is not None:
-            return IngestReport(
-                message_id=existing_msg_id,
-                duplicate=True,
-                claims_extracted=0,
-                decisions=[],
+            # 1. Early idempotency check (avoids redundant LLM extraction for duplicate messages)
+            text_hash = hashlib.sha256(message.text.encode("utf-8")).hexdigest()
+            existing_msg_id = self.repo.get_message_by_hash(
+                message.source_id, text_hash, message.event_time
             )
-
-        # 2. Source pre-validation (fail fast on unknown source)
-        source = self.repo.get_source(message.source_id)
-        if source is None:
-            source_cfg = self.cfg.get_source(message.source_id)
-            if source_cfg is None:
-                raise UnknownSourceError(
-                    f"Unknown source '{message.source_id}'. Please configure it in sources.yaml."
+            if existing_msg_id is not None:
+                return IngestReport(
+                    message_id=existing_msg_id,
+                    duplicate=True,
+                    claims_extracted=0,
+                    decisions=[],
                 )
 
-        # 3. LLM-assisted claim extraction
-        if self.llm_client is None:
-            if raise_on_error:
-                raise ValueError(
-                    "Cannot extract claims: LLMClient is not configured on MemoryService."
+            # 2. Source pre-validation (fail fast on unknown source)
+            source = self.repo.get_source(message.source_id)
+            if source is None:
+                source_cfg = self.cfg.get_source(message.source_id)
+                if source_cfg is None:
+                    raise UnknownSourceError(
+                        f"Unknown source '{message.source_id}'. "
+                        "Please configure it in sources.yaml."
+                    )
+
+            # 3. LLM-assisted claim extraction
+            if self.llm_client is None:
+                if raise_on_error:
+                    raise ValueError(
+                        "Cannot extract claims: LLMClient is not configured on MemoryService."
+                    )
+                return IngestReport(
+                    message_id=0,
+                    duplicate=False,
+                    claims_extracted=0,
+                    decisions=[],
+                    success=False,
+                    error="Extraction failed: LLMClient is not configured on MemoryService.",
                 )
-            return IngestReport(
-                message_id=0,
-                duplicate=False,
-                claims_extracted=0,
-                decisions=[],
-                success=False,
-                error="Extraction failed: LLMClient is not configured on MemoryService.",
+
+            from memorymesh.llm.extractor import ClaimExtractor
+
+            known_entities = [c.canonical_name for c in self._build_entity_candidates()]
+            repo_attrs = self.repo.list_attribute_schemas()
+            attributes = repo_attrs if repo_attrs else self.cfg.attributes
+            extractor = ClaimExtractor(
+                llm_client=self.llm_client,
+                attributes=attributes,
+                known_entities=known_entities,
             )
 
-        from memorymesh.llm.extractor import ClaimExtractor
+            try:
+                extraction_result = extractor.extract(
+                    message,
+                    model=model,
+                    raise_on_error=raise_on_error,
+                )
+            except Exception as exc:
+                if raise_on_error:
+                    raise
+                return IngestReport(
+                    message_id=0,
+                    duplicate=False,
+                    claims_extracted=0,
+                    decisions=[],
+                    success=False,
+                    error=f"Extraction failed: {exc}",
+                )
 
-        known_entities = [c.canonical_name for c in self._build_entity_candidates()]
-        repo_attrs = self.repo.list_attribute_schemas()
-        attributes = repo_attrs if repo_attrs else self.cfg.attributes
-        extractor = ClaimExtractor(
-            llm_client=self.llm_client,
-            attributes=attributes,
-            known_entities=known_entities,
-        )
+            if extraction_result.error is not None:
+                return IngestReport(
+                    message_id=0,
+                    duplicate=False,
+                    claims_extracted=0,
+                    decisions=[],
+                    success=False,
+                    error=f"Extraction failed: {extraction_result.error}",
+                )
 
-        try:
-            extraction_result = extractor.extract(
+            claims = extractor.to_domain_claims(extraction_result, message=message)
+
+            # 4. Ingest through deterministic engine
+            return self.ingest_claims(
                 message,
-                model=model,
-                raise_on_error=raise_on_error,
-            )
-        except Exception as exc:
-            if raise_on_error:
-                raise
-            return IngestReport(
-                message_id=0,
-                duplicate=False,
-                claims_extracted=0,
-                decisions=[],
-                success=False,
-                error=f"Extraction failed: {exc}",
+                claims,
+                recorded_at=eff_recorded_at,
             )
 
-        if extraction_result.error is not None:
-            return IngestReport(
-                message_id=0,
-                duplicate=False,
-                claims_extracted=0,
-                decisions=[],
-                success=False,
-                error=f"Extraction failed: {extraction_result.error}",
-            )
-
-        claims = extractor.to_domain_claims(extraction_result, message=message)
-
-        # 4. Ingest through deterministic engine
-        return self.ingest_claims(
-            message,
-            claims,
-            recorded_at=eff_recorded_at,
-        )
-
+    @_locked
     def ingest_claims(
         self,
         message: IngestMessage,
@@ -576,7 +611,7 @@ class MemoryService:
         eff_recorded_at = recorded_at or message.event_time
 
         # Atomic transaction: entire message and all claims/mutations either succeed or roll back
-        with self.repo.transaction():
+        with self._ingest_lock, self.repo.transaction():
             # Validate source exists or register from configuration catalog
             source = self.repo.get_source(message.source_id)
             if source is None:
@@ -878,6 +913,7 @@ class MemoryService:
                 decisions=decisions_log,
             )
 
+    @_locked
     def resolve_dispute(
         self,
         winner_memory_id: int,
@@ -902,7 +938,7 @@ class MemoryService:
             raise ValueError("Recorded timestamp must be a timezone-aware datetime.")
         eff_recorded_at = raw_recorded_at.astimezone(UTC)
 
-        with self.repo.transaction():
+        with self._ingest_lock, self.repo.transaction():
             winner = self.repo.get_memory(winner_memory_id)
             if winner is None:
                 raise MemoryNotFoundError(f"Memory with ID {winner_memory_id} does not exist.")
@@ -1018,6 +1054,7 @@ class MemoryService:
 
             return saved_log
 
+    @_locked
     def retract(
         self,
         memory_id: int,
@@ -1048,7 +1085,7 @@ class MemoryService:
         else:
             eff_valid_to = eff_recorded_at
 
-        with self.repo.transaction():
+        with self._ingest_lock, self.repo.transaction():
             target = self.repo.get_memory(memory_id)
             if target is None:
                 raise MemoryNotFoundError(f"Memory M{memory_id} not found.")
@@ -1189,6 +1226,7 @@ class MemoryService:
             scope_match=scope_match,
         )
 
+    @_locked
     def current(
         self,
         entity: str,
@@ -1309,11 +1347,13 @@ class MemoryService:
             ambiguity_reason=ambiguity_reason,
         )
 
+    @_locked
     def disputes(
         self,
         entity: str | None = None,
         *,
         known_at: datetime | None = None,
+        now: datetime | None = None,
     ) -> list[DisputeView]:
         """Retrieve active disputes, optionally filtered by entity name and belief time."""
         entity_id: int | None = None
@@ -1332,7 +1372,7 @@ class MemoryService:
         else:
             known_utc = None
 
-        ref_time = known_utc if known_utc is not None else self.clock()
+        ref_time = now or (known_utc if known_utc is not None else self.clock())
         if ref_time.tzinfo is None or ref_time.utcoffset() is None:
             raise ValueError("Reference time must be a timezone-aware datetime.")
         ref_time_utc = ref_time.astimezone(UTC)
@@ -1351,6 +1391,7 @@ class MemoryService:
     # Evidence & Confidence Operations
     # =========================================================================
 
+    @_locked
     def add_evidence(
         self,
         memory_id: int,
@@ -1389,6 +1430,7 @@ class MemoryService:
                 raise RuntimeError(f"Failed to retrieve persisted evidence {ev_id}.")
             return persisted
 
+    @_locked
     def recompute_confidence(self, memory_id: int) -> float:
         """Recompute a memory's base confidence from all its persisted evidence records."""
         with self.repo.transaction():
@@ -1404,6 +1446,7 @@ class MemoryService:
             self.repo.update_memory_confidence(memory_id, new_conf)
             return new_conf
 
+    @_locked
     def get_effective_confidence(
         self,
         memory_id: int,
@@ -1444,14 +1487,17 @@ class MemoryService:
             review_penalty=self.cfg.engine.thresholds.review_penalty,
         )
 
+    @_locked
     def get_evidence(self, evidence_id: int) -> Evidence | None:
         """Retrieve a single evidence row by ID."""
         return self.repo.get_evidence(evidence_id)
 
+    @_locked
     def get_memory_evidence(self, memory_id: int) -> list[Evidence]:
         """Retrieve all evidence records supporting a memory."""
         return self.repo.get_evidence_for_memory(memory_id)
 
+    @_locked
     def get_current(
         self,
         entity: str,
@@ -1484,6 +1530,7 @@ class MemoryService:
 
         return None
 
+    @_locked
     def get_as_of(
         self,
         entity: str,
@@ -1511,6 +1558,7 @@ class MemoryService:
     # P5.1: Dependency Resolution and Propagation
     # =========================================================================
 
+    @_locked
     def get_dependencies(self, memory_id: int) -> list[Memory]:
         """Retrieve direct upstream memories that memory_id depends on.
 
@@ -1526,6 +1574,7 @@ class MemoryService:
         upstream_ids = resolve_direct_dependencies(edges, memory_id)
         return self.repo.get_memories_by_ids(upstream_ids)
 
+    @_locked
     def get_dependents(self, memory_id: int) -> list[Memory]:
         """Retrieve direct downstream memories that depend on memory_id.
 
@@ -1541,6 +1590,7 @@ class MemoryService:
         downstream_ids = resolve_direct_dependents(edges, memory_id)
         return self.repo.get_memories_by_ids(downstream_ids)
 
+    @_locked
     def get_transitive_dependents(self, memory_id: int) -> list[tuple[Memory, list[int]]]:
         """Retrieve all reachable downstream dependent memories using cycle-safe traversal.
 
@@ -1562,6 +1612,7 @@ class MemoryService:
 
         return [(mem_map[dep_id], path) for dep_id, path in pairs if dep_id in mem_map]
 
+    @_locked
     def propagate_change(
         self,
         changed_ids: Sequence[int],
@@ -1708,6 +1759,7 @@ class MemoryService:
 
             return logs
 
+    @_locked
     def impact(self, memory_id: int) -> list[ImpactItem]:
         """Inspect the downstream blast radius and impact of a memory.
 
@@ -1801,6 +1853,7 @@ class MemoryService:
 
         return items
 
+    @_locked
     def acknowledge_review(
         self,
         memory_id: int,
@@ -1826,7 +1879,7 @@ class MemoryService:
             raise ValueError("Recorded timestamp must be a timezone-aware datetime.")
         eff_recorded_at = raw_recorded_at.astimezone(UTC)
 
-        with self.repo.transaction():
+        with self._ingest_lock, self.repo.transaction():
             mem = self.repo.get_memory(memory_id)
             if mem is None:
                 raise MemoryNotFoundError(f"Memory with ID {memory_id} does not exist.")
@@ -1874,9 +1927,12 @@ class MemoryService:
     # P4.1: Decision Log, Explain, and Invariant Checks
     # =========================================================================
 
+    @_locked
     def get_decision_logs(
         self,
         memory_id: int | None = None,
+        rule_id: str | None = None,
+        message_id: int | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> list[DecisionLogEntry]:
@@ -1891,10 +1947,18 @@ class MemoryService:
             mem = self.repo.get_memory(memory_id)
             if mem is None:
                 raise MemoryNotFoundError(f"Memory with id={memory_id} not found.")
-            return self.repo.get_decision_logs_for_memory(memory_id, limit=limit, offset=offset)
+            logs = self.repo.get_decision_logs_for_memory(memory_id, limit=limit, offset=offset)
+            if rule_id is not None:
+                logs = [d for d in logs if d.rule_id == rule_id]
+            if message_id is not None:
+                logs = [d for d in logs if d.message_id == message_id]
+            return logs
 
-        return self.repo.get_all_decision_logs(limit=limit, offset=offset)
+        return self.repo.get_all_decision_logs(
+            rule_id=rule_id, message_id=message_id, limit=limit, offset=offset
+        )
 
+    @_locked
     def explain(self, memory_id: int) -> QueryResult:
         """Answer 'Why does this memory exist in its current state?' deterministically.
 
@@ -1992,6 +2056,7 @@ class MemoryService:
             notes=notes,
         )
 
+    @_locked
     def parse_query(
         self,
         question: str,
@@ -2013,6 +2078,7 @@ class MemoryService:
         ref_time = reference_time or self.clock()
         return parser.parse(question, reference_time=ref_time, model=model)
 
+    @_locked
     def ask(
         self,
         question: str,
@@ -2324,6 +2390,7 @@ class MemoryService:
             answer=composed.to_final_answer(),
         )
 
+    @_locked
     def check_invariants(self) -> InvariantReport:
         """Run read-only integrity checks across all persisted invariants.
 
@@ -2564,4 +2631,356 @@ class MemoryService:
             is_valid=(len(violations) == 0),
             total_checked=total_checked,
             violations=violations,
+        )
+
+    # =========================================================================
+    # P9 API Support Methods (governed by docs/SPECIFICATION.md Section 7)
+    # =========================================================================
+
+    @_locked
+    def list_memory_views(
+        self,
+        *,
+        entity: str | None = None,
+        attribute: str | None = None,
+        status: str | None = None,
+        needs_review: bool | None = None,
+        limit: int = 100,
+        offset: int = 0,
+        now: datetime | None = None,
+    ) -> list[MemoryView]:
+        """List memories formatted as presentation views."""
+        ref_time = now or self.clock()
+        entity_id: int | None = None
+        if entity:
+            ent = self.repo.get_entity_by_name(entity) or self.repo.get_entity_by_alias(
+                normalize_entity_name(entity)
+            )
+            if ent:
+                entity_id = ent["id"]
+            else:
+                return []
+
+        norm_status = status.strip().lower() if status else None
+        mems = self.repo.list_memories(
+            entity_id=entity_id,
+            attribute=attribute,
+            status=norm_status,
+            needs_review=needs_review,
+            limit=limit,
+            offset=offset,
+        )
+        return [self._build_memory_view(m, ref_time=ref_time) for m in mems]
+
+    @_locked
+    def get_memory_view(
+        self,
+        memory_id: int,
+        *,
+        now: datetime | None = None,
+    ) -> MemoryView:
+        """Fetch a single memory as a presentation view or raise MemoryNotFoundError."""
+        mem = self.repo.get_memory(memory_id)
+        if mem is None:
+            raise MemoryNotFoundError(f"Memory with id={memory_id} not found.")
+        ref_time = now or self.clock()
+        return self._build_memory_view(mem, ref_time=ref_time)
+
+    @_locked
+    def get_timeline(
+        self,
+        entity: str | None = None,
+        attribute: str | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> list[SlotTimeline]:
+        """Retrieve memories grouped into slot timeline lanes."""
+        ref_time = now or self.clock()
+        entity_id: int | None = None
+        if entity:
+            ent = self.repo.get_entity_by_name(entity) or self.repo.get_entity_by_alias(
+                normalize_entity_name(entity)
+            )
+            if ent:
+                entity_id = ent["id"]
+            else:
+                return []
+
+        mems = self.repo.list_memories(
+            entity_id=entity_id,
+            attribute=attribute,
+            limit=500,
+            offset=0,
+        )
+
+        groups: dict[tuple[str, str, str], list[Memory]] = {}
+        for m in mems:
+            key = (m.entity_name, m.attribute, m.context_key or "")
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(m)
+
+        timelines: list[SlotTimeline] = []
+        for (ent_name, attr, ctx_key), group_mems in groups.items():
+            active_mems = [
+                self._build_memory_view(m, ref_time=ref_time)
+                for m in group_mems
+                if m.status != MemoryStatus.REJECTED
+            ]
+            rejected_mems = [
+                self._build_memory_view(m, ref_time=ref_time)
+                for m in group_mems
+                if m.status == MemoryStatus.REJECTED
+            ]
+            timelines.append(
+                SlotTimeline(
+                    entity=ent_name,
+                    attribute=attr,
+                    context_key=ctx_key,
+                    memories=active_mems,
+                    rejected=rejected_mems,
+                )
+            )
+        return timelines
+
+    @_locked
+    def get_graph(
+        self,
+        entity: str | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> GraphResponse:
+        """Construct the dependency and relationship graph for memories and entities."""
+        entity_id: int | None = None
+        if entity:
+            ent = self.repo.get_entity_by_name(entity) or self.repo.get_entity_by_alias(
+                normalize_entity_name(entity)
+            )
+            if ent:
+                entity_id = ent["id"]
+            else:
+                return GraphResponse(nodes=[], edges=[])
+
+        if entity_id is not None:
+            mems = self.repo.list_memories(entity_id=entity_id, limit=500)
+        else:
+            mems = self.repo.get_all_memories()
+
+        nodes: list[GraphNode] = []
+        edges: list[GraphEdge] = []
+        entity_ids_seen: set[int] = set()
+        mem_ids_seen: set[int] = set()
+
+        for m in mems:
+            mem_ids_seen.add(m.id)
+            if m.entity_id not in entity_ids_seen:
+                entity_ids_seen.add(m.entity_id)
+                nodes.append(
+                    GraphNode(
+                        id=f"entity:{m.entity_id}",
+                        kind="entity",
+                        label=m.entity_name,
+                        meta={"name": m.entity_name, "id": m.entity_id},
+                    )
+                )
+
+            nodes.append(
+                GraphNode(
+                    id=f"mem:{m.id}",
+                    kind="memory",
+                    label=f"{m.attribute}: {m.value_norm}",
+                    status=m.status,
+                    confidence=m.confidence,
+                    needs_review=m.needs_review,
+                    meta={
+                        "value": m.value_display,
+                        "valid_from": format_datetime_utc(m.valid_from),
+                        "valid_to": (format_datetime_utc(m.valid_to) if m.valid_to else None),
+                        "source_id": m.source_id,
+                        "entity": m.entity_name,
+                        "attribute": m.attribute,
+                        "context_key": m.context_key,
+                    },
+                )
+            )
+            edges.append(
+                GraphEdge(
+                    id=f"about:{m.id}->{m.entity_id}",
+                    source=f"mem:{m.id}",
+                    target=f"entity:{m.entity_id}",
+                    type="about",
+                    reason=f"Memory {m.id} is about entity {m.entity_name}",
+                )
+            )
+
+        all_edges = self.repo.get_all_edges(mem_ids_seen)
+        for e in all_edges:
+            if e.src_memory_id in mem_ids_seen and e.dst_memory_id in mem_ids_seen:
+                edge_type = e.type.value if hasattr(e.type, "value") else str(e.type)
+                edges.append(
+                    GraphEdge(
+                        id=f"edge:{e.id}",
+                        source=f"mem:{e.src_memory_id}",
+                        target=f"mem:{e.dst_memory_id}",
+                        type=edge_type,  # type: ignore[arg-type]
+                        reason=e.reason or "",
+                    )
+                )
+
+        return GraphResponse(nodes=nodes, edges=edges)
+
+    def get_catalog(self) -> CatalogResponse:
+        """Retrieve catalog containing sources, attributes, entities, thresholds, and ablation."""
+        sources = [
+            Source(
+                id=s.id,
+                name=s.name,
+                type=s.type.value if hasattr(s.type, "value") else str(s.type),  # type: ignore[arg-type]
+                reliability=s.reliability,
+                notes=s.notes,
+            )
+            for s in self.cfg.sources
+        ]
+        attributes = [
+            AttributeDef(
+                attribute=a.attribute,
+                description=a.description,
+                cardinality=a.cardinality,
+                value_type=a.value_type,
+                half_life_days=a.half_life_days,
+                allowed_values=a.allowed_values,
+                aliases=a.aliases,
+            )
+            for a in self.cfg.attributes
+        ]
+        entities = [e.model_dump() for e in self.cfg.entities]
+        thresholds = self.cfg.engine.thresholds.model_dump()
+        ablation = self.cfg.engine.ablation.model_dump()
+
+        return CatalogResponse(
+            sources=sources,
+            attributes=attributes,
+            entities=entities,
+            thresholds=thresholds,
+            ablation=ablation,
+        )
+
+    @_locked
+    def get_llm_call_logs(
+        self,
+        prompt_id: str | None = None,
+        status: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[LLMCallLog]:
+        """Retrieve auditable logs of LLM provider invocations."""
+        import json
+
+        calls = self.repo.get_llm_calls(
+            prompt_id=prompt_id,
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
+        logs: list[LLMCallLog] = []
+        for c in calls:
+            parsed: dict[str, Any] | list[Any] | None = None
+            if c.parsed_json:
+                try:
+                    parsed = json.loads(c.parsed_json)
+                except Exception:
+                    parsed = None
+
+            call_status = c.status.value if hasattr(c.status, "value") else str(c.status)
+            logs.append(
+                LLMCallLog(
+                    id=c.id,
+                    timestamp=c.timestamp,
+                    prompt_id=c.prompt_id,
+                    provider=c.provider,
+                    model=c.model,
+                    prompt_summary=c.prompt_summary,
+                    response_raw=c.response_raw,
+                    parsed_json=parsed,
+                    latency_ms=c.latency_ms,
+                    status=call_status,  # type: ignore[arg-type]
+                    error=c.error,
+                )
+            )
+        return logs
+
+    @_locked
+    def reset_database(self) -> None:
+        """Destructively recreate schema and reset in-memory caches."""
+        with self._ingest_lock:
+            from memorymesh.db import reset_db
+
+            reset_db(self.repo.conn)
+            self._llm_client_instance = None
+
+    @_locked
+    def ask_with_compare(
+        self,
+        question: str,
+        *,
+        now: datetime | None = None,
+        compare: bool = False,
+    ) -> AskResponse:
+        """Answer question with optional baseline naive RAG comparison."""
+        ref_time = now or self.clock()
+        mesh_result = self.ask(question, now=ref_time)
+
+        if not compare:
+            return AskResponse(mesh=mesh_result, baseline=None, baseline_retrieved=[])
+
+        from baseline.naive_rag import NaiveRAGBaseline
+
+        messages = self.repo.get_all_messages()
+        baseline: NaiveRAGBaseline | None = None
+        try:
+            baseline = NaiveRAGBaseline(
+                llm_client=self.llm_client,
+                config=self.cfg,
+                retrieval_method="fastembed",
+            )
+            baseline.index_messages(messages)
+        except Exception:
+            baseline = NaiveRAGBaseline(
+                llm_client=self.llm_client,
+                config=self.cfg,
+                retrieval_method="lexical",
+            )
+            baseline.index_messages(messages)
+
+        hits = baseline.retrieve(question, top_k=5)
+        baseline_answer = baseline.ask(question, reference_time=ref_time)
+
+        baseline_hits: list[BaselineHit] = []
+        for m_dict, score in hits:
+            raw_id = str(m_dict.get("id", "0"))
+            if raw_id.startswith("m") and raw_id[1:].isdigit():
+                msg_id = int(raw_id[1:])
+            elif raw_id.isdigit():
+                msg_id = int(raw_id)
+            else:
+                msg_id = 0
+
+            from memorymesh.repository import parse_db_datetime
+
+            t_val = parse_db_datetime(m_dict.get("t")) or ref_time
+
+            baseline_hits.append(
+                BaselineHit(
+                    message_id=msg_id,
+                    source_name=str(m_dict.get("source", "")),
+                    event_time=t_val,
+                    text=str(m_dict.get("text", "")),
+                    score=float(score),
+                )
+            )
+
+        return AskResponse(
+            mesh=mesh_result,
+            baseline=baseline_answer,
+            baseline_retrieved=baseline_hits,
         )

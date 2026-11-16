@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_serializer, model_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 
 # ==============================================================================
 # Base Model with Timestamp Serialization
@@ -682,3 +682,157 @@ class LLMCall(MeshBaseModel):
     latency_ms: float
     status: LLMCallStatus
     error: str | None = None
+
+
+# ==============================================================================
+# P9 REST API Data Models (governed by docs/SPECIFICATION.md Section 7)
+# ==============================================================================
+
+
+class GraphNode(MeshBaseModel):
+    """Node in the memory/entity dependency and relationship graph."""
+
+    id: str
+    kind: Literal["entity", "memory"]
+    label: str
+    status: MemoryStatus | None = None
+    confidence: float | None = None
+    needs_review: bool = False
+    meta: dict[str, Any] = Field(default_factory=dict)
+
+
+class GraphEdge(MeshBaseModel):
+    """Directed edge in the memory/entity graph."""
+
+    id: str
+    source: str
+    target: str
+    type: Literal["about", "supersedes", "refines", "contradicts", "depends_on"]
+    reason: str = ""
+
+
+class GraphResponse(MeshBaseModel):
+    """Complete graph response containing nodes and edges."""
+
+    nodes: list[GraphNode] = Field(default_factory=list)
+    edges: list[GraphEdge] = Field(default_factory=list)
+
+
+class BaselineHit(MeshBaseModel):
+    """Retrieved raw message hit from baseline naive RAG."""
+
+    message_id: int
+    source_name: str
+    event_time: datetime
+    text: str
+    score: float
+
+
+class AskResponse(MeshBaseModel):
+    """API response for POST /api/ask containing MemoryMesh and baseline answers."""
+
+    mesh: AskResult
+    baseline: FinalAnswer | None = None
+    baseline_retrieved: list[BaselineHit] = Field(default_factory=list)
+
+
+class LLMCallLog(MeshBaseModel):
+    """Auditable log entry for an LLM provider call."""
+
+    id: str
+    timestamp: datetime
+    prompt_id: str
+    provider: str
+    model: str
+    prompt_summary: str
+    response_raw: str
+    parsed_json: dict[str, Any] | list[Any] | None = None
+    latency_ms: float
+    status: Literal["success", "retry", "error", "cache_hit"]
+    error: str | None = None
+
+
+class EvalSummary(MeshBaseModel):
+    """Summary of latest evaluation benchmark run."""
+
+    run_id: str
+    created_at: datetime
+    mode: str
+    systems: list[str]
+    metrics: dict[str, dict[str, float | None]]
+    scenarios: int
+    questions: int
+
+
+class SlotTimeline(MeshBaseModel):
+    """Timeline lane for a specific entity attribute and context."""
+
+    entity: str
+    attribute: str
+    context_key: str = ""
+    memories: list[MemoryView] = Field(default_factory=list)
+    rejected: list[MemoryView] = Field(default_factory=list)
+
+
+class HealthResponse(MeshBaseModel):
+    """Health status and configuration info."""
+
+    status: str = "ok"
+    llm_provider: str
+    db: str
+
+
+class CatalogResponse(MeshBaseModel):
+    """Configuration catalog powering settings and filters."""
+
+    sources: list[Source] = Field(default_factory=list)
+    attributes: list[AttributeDef] = Field(default_factory=list)
+    entities: list[dict[str, Any]] = Field(default_factory=list)
+    thresholds: dict[str, Any] = Field(default_factory=dict)
+    ablation: dict[str, Any] = Field(default_factory=dict)
+
+
+class IngestRequest(IngestMessage):
+    """Request payload for POST /api/ingest."""
+
+    meta: dict[str, Any] = Field(default_factory=dict)
+    recorded_at: datetime | None = None
+    mode: Literal["e2e", "structured"] = "e2e"
+    claims: list[Claim] | None = None
+
+    @field_validator("event_time", "recorded_at")
+    @classmethod
+    def validate_ingest_tz(cls, v: datetime | None) -> datetime | None:
+        if v is not None and (v.tzinfo is None or v.utcoffset() is None):
+            raise ValueError("Timestamp must be timezone-aware (e.g. ISO 8601 with 'Z' or offset).")
+        return v
+
+
+class ResolveDisputeRequest(MeshBaseModel):
+    """Request payload for POST /api/disputes/resolve."""
+
+    winner_memory_id: int
+
+
+class AskRequest(MeshBaseModel):
+    """Request payload for POST /api/ask."""
+
+    question: str
+    now: datetime | None = None
+    compare: bool = False
+
+    @field_validator("now")
+    @classmethod
+    def validate_now_tz(cls, v: datetime | None) -> datetime | None:
+        if v is not None and (v.tzinfo is None or v.utcoffset() is None):
+            raise ValueError(
+                "Timestamp parameter 'now' must be timezone-aware "
+                "(e.g. ISO 8601 with 'Z' or offset)."
+            )
+        return v
+
+
+class ResetResponse(MeshBaseModel):
+    """Response payload for POST /api/demo/reset."""
+
+    ok: bool = True

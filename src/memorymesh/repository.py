@@ -1696,20 +1696,32 @@ class Repository:
 
     def get_all_decision_logs(
         self,
+        rule_id: str | None = None,
+        message_id: int | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> list[DecisionLogEntry]:
         """Retrieve all decision log entries ordered chronologically with stable tie-breaker."""
+        conditions: list[str] = []
+        params: list[Any] = []
+        if rule_id is not None:
+            conditions.append("rule_id = ?")
+            params.append(rule_id)
+        if message_id is not None:
+            conditions.append("message_id = ?")
+            params.append(message_id)
+
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = f"SELECT * FROM decision_log {where_clause} ORDER BY created_at ASC, id ASC"
+
         if limit is not None:
-            sql = "SELECT * FROM decision_log ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?"
-            cursor = self.conn.execute(sql, (limit, offset))
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
         elif offset > 0:
-            sql = "SELECT * FROM decision_log ORDER BY created_at ASC, id ASC LIMIT -1 OFFSET ?"
-            cursor = self.conn.execute(sql, (offset,))
-        else:
-            sql = "SELECT * FROM decision_log ORDER BY created_at ASC, id ASC"
-            cursor = self.conn.execute(sql)
-        rows = cursor.fetchall()
+            sql += " LIMIT -1 OFFSET ?"
+            params.append(offset)
+
+        rows = self.conn.execute(sql, params).fetchall()
         return [self._row_to_decision_log(r) for r in rows]
 
     def get_all_memories(self, include_evidence: bool = True) -> list[Memory]:
@@ -1983,15 +1995,19 @@ class Repository:
     def get_llm_calls(
         self,
         prompt_id: str | None = None,
+        status: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> list[LLMCall]:
-        """Retrieve logged LLM calls, optionally filtered by prompt_id."""
+        """Retrieve logged LLM calls, optionally filtered by prompt_id and status."""
         conditions: list[str] = []
         params: list[Any] = []
         if prompt_id is not None:
             conditions.append("prompt_id = ?")
             params.append(prompt_id)
+        if status is not None:
+            conditions.append("status = ?")
+            params.append(status)
 
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         sql = f"SELECT * FROM llm_calls {where_clause} ORDER BY timestamp ASC, rowid ASC"
@@ -2005,3 +2021,68 @@ class Repository:
 
         rows = self.conn.execute(sql, params).fetchall()
         return [self._row_to_llm_call(r) for r in rows]
+
+    def list_memories(
+        self,
+        *,
+        entity_id: int | None = None,
+        attribute: str | None = None,
+        status: str | None = None,
+        needs_review: bool | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Memory]:
+        """List memories with optional filters and pagination, ordered by id DESC."""
+        clauses: list[str] = []
+        params: list[Any] = []
+
+        if entity_id is not None:
+            clauses.append("m.entity_id = ?")
+            params.append(entity_id)
+        if attribute is not None:
+            clauses.append("m.attribute = ?")
+            params.append(attribute)
+        if status is not None:
+            clauses.append("m.status = ?")
+            params.append(status)
+        if needs_review is not None:
+            clauses.append("m.needs_review = ?")
+            params.append(1 if needs_review else 0)
+
+        where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"""
+        SELECT m.*, e.canonical_name AS entity_name
+        FROM memories m
+        LEFT JOIN entities e ON m.entity_id = e.id
+        {where_clause}
+        ORDER BY m.id DESC
+        LIMIT ? OFFSET ?
+        """
+        clamped_limit = min(max(1, limit), 500)
+        params.extend([clamped_limit, max(0, offset)])
+        rows = self.conn.execute(sql, params).fetchall()
+        return [self._row_to_memory(r, include_evidence=True) for r in rows]
+
+    def get_all_edges(self, memory_ids: list[int] | set[int] | None = None) -> list[Edge]:
+        """Retrieve all graph edges, optionally filtered to a set of memory IDs."""
+        if memory_ids is not None:
+            if not memory_ids:
+                return []
+            placeholders = ",".join("?" for _ in memory_ids)
+            sql = f"""
+            SELECT * FROM edges
+            WHERE src_memory_id IN ({placeholders}) OR dst_memory_id IN ({placeholders})
+            ORDER BY id ASC
+            """
+            params = list(memory_ids) + list(memory_ids)
+            rows = self.conn.execute(sql, params).fetchall()
+        else:
+            sql = "SELECT * FROM edges ORDER BY id ASC"
+            rows = self.conn.execute(sql).fetchall()
+        return [self._row_to_edge(r) for r in rows]
+
+    def get_all_messages(self) -> list[dict[str, Any]]:
+        """Retrieve all ingested messages ordered by event_time ASC, id ASC."""
+        sql = "SELECT * FROM messages ORDER BY event_time ASC, id ASC"
+        rows = self.conn.execute(sql).fetchall()
+        return [dict(r) for r in rows]

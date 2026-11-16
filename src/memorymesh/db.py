@@ -32,11 +32,16 @@ def is_in_memory(db_path: str | Path) -> bool:
     return path_str == ":memory:" or "mode=memory" in path_str
 
 
-def get_connection(db_path: str | Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
+def get_connection(
+    db_path: str | Path = DEFAULT_DB_PATH,
+    check_same_thread: bool = True,
+) -> sqlite3.Connection:
     """Open a SQLite connection with foreign keys enabled and row factory configured.
 
     Args:
         db_path: Filesystem path to SQLite file or ':memory:' for transient tests.
+        check_same_thread: If True, sqlite3 restricts connection access to the creating thread.
+            Set False for multi-threaded environments (e.g. FastAPI threadpool workers).
 
     Returns:
         An open sqlite3.Connection with Row factory and foreign keys active.
@@ -45,7 +50,7 @@ def get_connection(db_path: str | Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
     if not is_in_memory(path_str):
         Path(path_str).resolve().parent.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(path_str)
+    conn = sqlite3.connect(path_str, check_same_thread=check_same_thread)
     conn.row_factory = sqlite3.Row
 
     # Foreign keys must be enabled per connection in SQLite
@@ -74,13 +79,17 @@ def connection_scope(
         conn.close()
 
 
-def init_db(target: str | Path | sqlite3.Connection = DEFAULT_DB_PATH) -> sqlite3.Connection:
+def init_db(
+    target: str | Path | sqlite3.Connection = DEFAULT_DB_PATH,
+    check_same_thread: bool = True,
+) -> sqlite3.Connection:
     """Execute schema.sql to initialize all tables and indexes.
 
     Safe for repeated executions (uses IF NOT EXISTS constructs).
 
     Args:
         target: A database path (file or :memory:) or an existing sqlite3.Connection.
+        check_same_thread: Whether to enforce single-thread access on newly opened connections.
 
     Returns:
         The initialized sqlite3.Connection.
@@ -93,7 +102,7 @@ def init_db(target: str | Path | sqlite3.Connection = DEFAULT_DB_PATH) -> sqlite
         conn.executescript(schema_sql)
         return conn
 
-    conn = get_connection(target)
+    conn = get_connection(target, check_same_thread=check_same_thread)
     conn.executescript(schema_sql)
     return conn
 
