@@ -360,3 +360,62 @@ def test_decision_log_and_ingest_report() -> None:
     assert rep.claims_extracted == 1
     assert len(rep.decisions) == 1
     assert rep.decisions[0].rule_id == "R-INSERT"
+
+
+def test_mesh_base_model_serialization_modes_and_schemas() -> None:
+    """Verify MeshBaseModel datetime serialization across Python/JSON modes and schema fidelity.
+
+    Ensures:
+      - mode='python' leaves datetimes as native datetime instances.
+      - mode='json' serializes datetimes to YYYY-MM-DDTHH:MM:SSZ UTC strings.
+      - model_dump_json() serializes datetimes to YYYY-MM-DDTHH:MM:SSZ UTC strings.
+      - validation and serialization JSON schemas retain explicit property types
+        (string, date-time format, number) rather than collapsing to untyped schemas.
+    """
+    dt = datetime(2026, 6, 1, 12, 30, 45, tzinfo=UTC)
+    mem = Memory(
+        id=42,
+        entity_id=1,
+        entity_name="Server A",
+        attribute="python_version",
+        value_norm="3.12",
+        value_display="3.12",
+        valid_from=dt,
+        valid_to=None,
+        recorded_at=dt,
+        status=MemoryStatus.ACTIVE,
+        confidence=0.95,
+        message_id=10,
+        source_id="priya",
+    )
+
+    # 1. model_dump() serializes datetimes to UTC ISO-8601 strings
+    py_dump = mem.model_dump()
+    assert py_dump["valid_from"] == "2026-06-01T12:30:45Z"
+    assert py_dump["recorded_at"] == "2026-06-01T12:30:45Z"
+    assert py_dump["status"] == MemoryStatus.ACTIVE
+
+    # 2. mode="json" converts datetimes to UTC ISO-8601 strings
+    json_dump = mem.model_dump(mode="json")
+    assert json_dump["valid_from"] == "2026-06-01T12:30:45Z"
+    assert json_dump["recorded_at"] == "2026-06-01T12:30:45Z"
+    assert json_dump["valid_to"] is None
+    assert json_dump["status"] == "active"
+
+    # 3. model_dump_json() outputs formatted UTC string
+    serialized_json = json.loads(mem.model_dump_json())
+    assert serialized_json["valid_from"] == "2026-06-01T12:30:45Z"
+    assert serialized_json["recorded_at"] == "2026-06-01T12:30:45Z"
+
+    # 4. JSON Schema in validation mode retains concrete types
+    val_schema = Memory.model_json_schema(mode="validation")
+    assert val_schema["properties"]["valid_from"]["type"] == "string"
+    assert val_schema["properties"]["valid_from"]["format"] == "date-time"
+    assert val_schema["properties"]["confidence"]["type"] == "number"
+
+    # 5. JSON Schema in serialization mode retains concrete types
+    ser_schema = Memory.model_json_schema(mode="serialization")
+    assert ser_schema["properties"]["valid_from"]["type"] == "string"
+    assert ser_schema["properties"]["valid_from"]["format"] == "date-time"
+    assert ser_schema["properties"]["confidence"]["type"] == "number"
+    assert "$ref" in ser_schema["properties"]["status"]

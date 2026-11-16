@@ -47,8 +47,8 @@ web:
 	npm --prefix frontend run dev
 
 types:
-	@echo NOTE: 'make types' requires the FastAPI backend to be running at http://localhost:8000.
-	npx --prefix frontend openapi-typescript http://localhost:8000/openapi.json -o frontend/src/api/types.ts
+	python scripts/export_openapi.py openapi.json
+	npx --prefix frontend openapi-typescript openapi.json -o frontend/src/api/types.ts
 
 web-check:
 	npm --prefix frontend run lint

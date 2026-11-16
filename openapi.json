@@ -1,0 +1,2562 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "MemoryMesh API",
+    "description": "Conflict-aware long-term memory system for LLM applications.",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/ingest": {
+      "post": {
+        "tags": [
+          "write"
+        ],
+        "summary": "Ingest message and resolve claims",
+        "description": "Ingest a message and extract/resolve memory claims.",
+        "operationId": "ingest_message_api_ingest_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IngestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestReport"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memories/{id}/acknowledge": {
+      "post": {
+        "tags": [
+          "write"
+        ],
+        "summary": "Acknowledge flagged memory review",
+        "description": "Clear review flag on a memory and log acknowledgement.",
+        "operationId": "acknowledge_memory_review_api_memories__id__acknowledge_post",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Memory"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/disputes/resolve": {
+      "post": {
+        "tags": [
+          "write"
+        ],
+        "summary": "Resolve a memory dispute",
+        "description": "Resolve an active dispute group by selecting a winner memory.",
+        "operationId": "resolve_dispute_api_disputes_resolve_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResolveDisputeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecisionLogEntry"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/demo/reset": {
+      "post": {
+        "tags": [
+          "write"
+        ],
+        "summary": "Reset database for demo",
+        "description": "Recreate clean schema and reset in-memory state.",
+        "operationId": "reset_demo_api_demo_reset_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResetResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/health": {
+      "get": {
+        "tags": [
+          "read"
+        ],
+        "summary": "Health check and configuration status",
+        "description": "Report service health, active LLM provider, and database connection status.",
+        "operationId": "get_health_api_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/catalog": {
+      "get": {
+        "tags": [
+          "read"
+        ],
+        "summary": "Configuration catalog for settings and metadata",
+        "description": "Retrieve system configuration catalog for sources, attributes, and entities.",
+        "operationId": "get_catalog_api_catalog_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memories": {
+      "get": {
+        "tags": [
+          "read"
+        ],
+        "summary": "List memories matching filters",
+        "description": "List memories formatted as presentation views.",
+        "operationId": "list_memories_api_memories_get",
+        "parameters": [
+          {
+            "name": "entity",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Entity"
+            }
+          },
+          {
+            "name": "attribute",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Attribute"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "needs_review",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Needs Review"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "now",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Now"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MemoryView"
+                  },
+                  "title": "Response List Memories Api Memories Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memories/{id}": {
+      "get": {
+        "tags": [
+          "read"
+        ],
+        "summary": "Get single memory view",
+        "description": "Retrieve single memory view by ID or return 404.",
+        "operationId": "get_memory_api_memories__id__get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Id"
+            }
+          },
+          {
+            "name": "now",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Now"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memories/{id}/explain": {
+      "get": {
+        "tags": [
+          "read"
+        ],
+        "summary": "Explain memory origin, provenance, and decisions",
+        "description": "Inspect persisted state, evidence, decisions, and graph edges for a memory.",
+        "operationId": "explain_memory_api_memories__id__explain_get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memories/{id}/impact": {
+      "get": {
+        "tags": [
+          "read"
+        ],
+        "summary": "Calculate downstream impact of a memory change",
+        "description": "Traverse dependency graph and compute impacted downstream memories.",
+        "operationId": "get_memory_impact_api_memories__id__impact_get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ImpactItem"
+                  },
+                  "title": "Response Get Memory Impact Api Memories  Id  Impact Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/timeline": {
+      "get": {
+        "tags": [
+          "read"
+        ],
+        "summary": "Get timeline grouped by entity and attribute slot",
+        "description": "Retrieve memories and rejected claims grouped into temporal slot lanes.",
+        "operationId": "get_timeline_api_timeline_get",
+        "parameters": [
+          {
+            "name": "entity",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Entity"
+            }
+          },
+          {
+            "name": "attribute",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Attribute"
+            }
+          },
+          {
+            "name": "now",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Now"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SlotTimeline"
+                  },
+                  "title": "Response Get Timeline Api Timeline Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/graph": {
+      "get": {
+        "tags": [
+          "read"
+        ],
+        "summary": "Get entity and memory dependency graph",
+        "description": "Construct dependency and relationship graph for entities and memories.",
+        "operationId": "get_graph_api_graph_get",
+        "parameters": [
+          {
+            "name": "entity",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Entity"
+            }
+          },
+          {
+            "name": "now",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Now"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/disputes": {
+      "get": {
+        "tags": [
+          "read"
+        ],
+        "summary": "List active memory disputes",
+        "description": "Retrieve pairs of active memories in dispute.",
+        "operationId": "get_disputes_api_disputes_get",
+        "parameters": [
+          {
+            "name": "entity",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Entity"
+            }
+          },
+          {
+            "name": "now",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Now"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DisputeView"
+                  },
+                  "title": "Response Get Disputes Api Disputes Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/decisions": {
+      "get": {
+        "tags": [
+          "read"
+        ],
+        "summary": "List decision log history",
+        "description": "Retrieve auditable decision log history chronologically.",
+        "operationId": "get_decisions_api_decisions_get",
+        "parameters": [
+          {
+            "name": "rule_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Rule Id"
+            }
+          },
+          {
+            "name": "message_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Message Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DecisionLogEntry"
+                  },
+                  "title": "Response Get Decisions Api Decisions Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ask": {
+      "post": {
+        "tags": [
+          "ask"
+        ],
+        "summary": "Answer natural language question with optional baseline comparison",
+        "description": "Answer a question grounded in temporal memories with optional naive RAG comparison.",
+        "operationId": "ask_question_api_ask_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AskRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AskResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/llm/calls": {
+      "get": {
+        "tags": [
+          "llm"
+        ],
+        "summary": "List logged LLM provider invocations",
+        "description": "Retrieve logged LLM calls with latency, prompt summary, and parsed output.",
+        "operationId": "get_llm_calls_api_llm_calls_get",
+        "parameters": [
+          {
+            "name": "prompt_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Prompt Id"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LLMCallLog"
+                  },
+                  "title": "Response Get Llm Calls Api Llm Calls Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/eval/latest": {
+      "get": {
+        "tags": [
+          "eval"
+        ],
+        "summary": "Get latest evaluation benchmark summary",
+        "description": "Retrieve summary metrics and system comparison table from latest evaluation run.",
+        "operationId": "get_latest_eval_api_eval_latest_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalSummary"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/eval/latest/report": {
+      "get": {
+        "tags": [
+          "eval"
+        ],
+        "summary": "Get latest evaluation Markdown report",
+        "description": "Retrieve raw Markdown content of the latest evaluation report.",
+        "operationId": "get_latest_eval_report_api_eval_latest_report_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Action": {
+        "type": "string",
+        "enum": [
+          "INSERT",
+          "CORROBORATE",
+          "REFINE",
+          "COEXIST",
+          "REPLACE",
+          "BACKFILL",
+          "REJECT",
+          "DISPUTE",
+          "RETRACT",
+          "SKIP",
+          "PROPAGATE",
+          "ACKNOWLEDGE"
+        ],
+        "title": "Action",
+        "description": "Actions decided by the resolution engine."
+      },
+      "AskRequest": {
+        "properties": {
+          "question": {
+            "type": "string",
+            "title": "Question"
+          },
+          "now": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Now"
+          },
+          "compare": {
+            "type": "boolean",
+            "title": "Compare",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "question"
+        ],
+        "title": "AskRequest",
+        "description": "Request payload for POST /api/ask."
+      },
+      "AskResponse": {
+        "properties": {
+          "mesh": {
+            "$ref": "#/components/schemas/AskResult"
+          },
+          "baseline": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FinalAnswer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "baseline_retrieved": {
+            "items": {
+              "$ref": "#/components/schemas/BaselineHit"
+            },
+            "type": "array",
+            "title": "Baseline Retrieved"
+          }
+        },
+        "type": "object",
+        "required": [
+          "mesh"
+        ],
+        "title": "AskResponse",
+        "description": "API response for POST /api/ask containing MemoryMesh and baseline answers."
+      },
+      "AskResult": {
+        "properties": {
+          "question": {
+            "type": "string",
+            "title": "Question"
+          },
+          "result": {
+            "$ref": "#/components/schemas/QueryResult"
+          },
+          "answer": {
+            "$ref": "#/components/schemas/FinalAnswer"
+          }
+        },
+        "type": "object",
+        "required": [
+          "question",
+          "result",
+          "answer"
+        ],
+        "title": "AskResult",
+        "description": "Top-level ask response containing query details and composed answer."
+      },
+      "AttrRef": {
+        "properties": {
+          "entity": {
+            "type": "string",
+            "title": "Entity"
+          },
+          "attribute": {
+            "type": "string",
+            "title": "Attribute"
+          }
+        },
+        "type": "object",
+        "required": [
+          "entity",
+          "attribute"
+        ],
+        "title": "AttrRef",
+        "description": "Reference to an entity's attribute for dependency tracking."
+      },
+      "AttributeDef": {
+        "properties": {
+          "attribute": {
+            "type": "string",
+            "title": "Attribute"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "cardinality": {
+            "$ref": "#/components/schemas/Cardinality"
+          },
+          "value_type": {
+            "$ref": "#/components/schemas/ValueType"
+          },
+          "half_life_days": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Half Life Days"
+          },
+          "allowed_values": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Allowed Values"
+          },
+          "aliases": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Aliases"
+          }
+        },
+        "type": "object",
+        "required": [
+          "attribute",
+          "description",
+          "cardinality",
+          "value_type"
+        ],
+        "title": "AttributeDef",
+        "description": "Attribute catalog schema definition."
+      },
+      "BaselineHit": {
+        "properties": {
+          "message_id": {
+            "type": "integer",
+            "title": "Message Id"
+          },
+          "source_name": {
+            "type": "string",
+            "title": "Source Name"
+          },
+          "event_time": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Event Time"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          }
+        },
+        "type": "object",
+        "required": [
+          "message_id",
+          "source_name",
+          "event_time",
+          "text",
+          "score"
+        ],
+        "title": "BaselineHit",
+        "description": "Retrieved raw message hit from baseline naive RAG."
+      },
+      "Cardinality": {
+        "type": "string",
+        "enum": [
+          "single",
+          "multi"
+        ],
+        "title": "Cardinality",
+        "description": "Cardinality of an attribute."
+      },
+      "CatalogResponse": {
+        "properties": {
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/Source"
+            },
+            "type": "array",
+            "title": "Sources"
+          },
+          "attributes": {
+            "items": {
+              "$ref": "#/components/schemas/AttributeDef"
+            },
+            "type": "array",
+            "title": "Attributes"
+          },
+          "entities": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Entities"
+          },
+          "thresholds": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Thresholds"
+          },
+          "ablation": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Ablation"
+          }
+        },
+        "type": "object",
+        "title": "CatalogResponse",
+        "description": "Configuration catalog powering settings and filters."
+      },
+      "Claim": {
+        "properties": {
+          "subject": {
+            "type": "string",
+            "title": "Subject"
+          },
+          "attribute": {
+            "type": "string",
+            "title": "Attribute"
+          },
+          "value": {
+            "type": "string",
+            "title": "Value"
+          },
+          "previous_value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous Value"
+          },
+          "polarity": {
+            "$ref": "#/components/schemas/Polarity",
+            "default": "assert"
+          },
+          "valid_from": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid From"
+          },
+          "valid_to": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid To"
+          },
+          "context": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Context"
+          },
+          "depends_on": {
+            "items": {
+              "$ref": "#/components/schemas/AttrRef"
+            },
+            "type": "array",
+            "title": "Depends On"
+          },
+          "extract_confidence": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Extract Confidence"
+          },
+          "span": {
+            "type": "string",
+            "title": "Span",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "subject",
+          "attribute",
+          "value",
+          "extract_confidence"
+        ],
+        "title": "Claim",
+        "description": "Raw output of the extractor, before resolution."
+      },
+      "DecisionLogEntry": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "message_id": {
+            "type": "integer",
+            "title": "Message Id"
+          },
+          "claim_json": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Claim Json"
+          },
+          "action": {
+            "$ref": "#/components/schemas/Action"
+          },
+          "rule_id": {
+            "type": "string",
+            "title": "Rule Id"
+          },
+          "memory_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Id"
+          },
+          "affected_memory_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Affected Memory Ids"
+          },
+          "scores": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": "object",
+            "title": "Scores"
+          },
+          "explanation": {
+            "type": "string",
+            "title": "Explanation"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "message_id",
+          "claim_json",
+          "action",
+          "rule_id",
+          "explanation",
+          "created_at"
+        ],
+        "title": "DecisionLogEntry",
+        "description": "Audit log entry for an ingestion or resolution decision."
+      },
+      "DisputeView": {
+        "properties": {
+          "a": {
+            "$ref": "#/components/schemas/MemoryView"
+          },
+          "b": {
+            "$ref": "#/components/schemas/MemoryView"
+          },
+          "edge_reason": {
+            "type": "string",
+            "title": "Edge Reason",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "a",
+          "b"
+        ],
+        "title": "DisputeView",
+        "description": "Two conflicting active memories in dispute."
+      },
+      "Edge": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "src_memory_id": {
+            "type": "integer",
+            "title": "Src Memory Id"
+          },
+          "dst_memory_id": {
+            "type": "integer",
+            "title": "Dst Memory Id"
+          },
+          "type": {
+            "$ref": "#/components/schemas/EdgeType"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "default": ""
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "src_memory_id",
+          "dst_memory_id",
+          "type",
+          "created_at"
+        ],
+        "title": "Edge",
+        "description": "Directed edge between two memories."
+      },
+      "EdgeType": {
+        "type": "string",
+        "enum": [
+          "supersedes",
+          "refines",
+          "contradicts",
+          "depends_on"
+        ],
+        "title": "EdgeType",
+        "description": "Typed relationship between memories."
+      },
+      "EvalSummary": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "mode": {
+            "type": "string",
+            "title": "Mode"
+          },
+          "systems": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Systems"
+          },
+          "metrics": {
+            "additionalProperties": {
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": "object"
+            },
+            "type": "object",
+            "title": "Metrics"
+          },
+          "scenarios": {
+            "type": "integer",
+            "title": "Scenarios"
+          },
+          "questions": {
+            "type": "integer",
+            "title": "Questions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id",
+          "created_at",
+          "mode",
+          "systems",
+          "metrics",
+          "scenarios",
+          "questions"
+        ],
+        "title": "EvalSummary",
+        "description": "Summary of latest evaluation benchmark run."
+      },
+      "Evidence": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "memory_id": {
+            "type": "integer",
+            "title": "Memory Id"
+          },
+          "source_id": {
+            "type": "string",
+            "title": "Source Id"
+          },
+          "message_id": {
+            "type": "integer",
+            "title": "Message Id"
+          },
+          "strength": {
+            "type": "number",
+            "title": "Strength"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Observed At"
+          },
+          "span": {
+            "type": "string",
+            "title": "Span",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "memory_id",
+          "source_id",
+          "message_id",
+          "strength",
+          "observed_at"
+        ],
+        "title": "Evidence",
+        "description": "Stored link between a memory and the source/message that stated it."
+      },
+      "FinalAnswer": {
+        "properties": {
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          },
+          "values": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Values"
+          },
+          "conflict_flagged": {
+            "type": "boolean",
+            "title": "Conflict Flagged",
+            "default": false
+          },
+          "needs_review_flagged": {
+            "type": "boolean",
+            "title": "Needs Review Flagged",
+            "default": false
+          },
+          "abstained": {
+            "type": "boolean",
+            "title": "Abstained",
+            "default": false
+          },
+          "explanation": {
+            "type": "string",
+            "title": "Explanation",
+            "default": ""
+          },
+          "cited_memory_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Cited Memory Ids"
+          },
+          "answer_text": {
+            "type": "string",
+            "title": "Answer Text",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "FinalAnswer",
+        "description": "Final natural-language answer schema shared with naive-RAG baseline."
+      },
+      "GraphEdge": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "target": {
+            "type": "string",
+            "title": "Target"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "about",
+              "supersedes",
+              "refines",
+              "contradicts",
+              "depends_on"
+            ],
+            "title": "Type"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "source",
+          "target",
+          "type"
+        ],
+        "title": "GraphEdge",
+        "description": "Directed edge in the memory/entity graph."
+      },
+      "GraphNode": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "entity",
+              "memory"
+            ],
+            "title": "Kind"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MemoryStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "needs_review": {
+            "type": "boolean",
+            "title": "Needs Review",
+            "default": false
+          },
+          "meta": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Meta"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "label"
+        ],
+        "title": "GraphNode",
+        "description": "Node in the memory/entity dependency and relationship graph."
+      },
+      "GraphResponse": {
+        "properties": {
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/GraphNode"
+            },
+            "type": "array",
+            "title": "Nodes"
+          },
+          "edges": {
+            "items": {
+              "$ref": "#/components/schemas/GraphEdge"
+            },
+            "type": "array",
+            "title": "Edges"
+          }
+        },
+        "type": "object",
+        "title": "GraphResponse",
+        "description": "Complete graph response containing nodes and edges."
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HealthResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "ok"
+          },
+          "llm_provider": {
+            "type": "string",
+            "title": "Llm Provider"
+          },
+          "db": {
+            "type": "string",
+            "title": "Db"
+          }
+        },
+        "type": "object",
+        "required": [
+          "llm_provider",
+          "db"
+        ],
+        "title": "HealthResponse",
+        "description": "Health status and configuration info."
+      },
+      "ImpactItem": {
+        "properties": {
+          "memory": {
+            "$ref": "#/components/schemas/MemoryView"
+          },
+          "path": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Path"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "all_paths": {
+            "items": {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "type": "array",
+            "title": "All Paths"
+          },
+          "paths_truncated": {
+            "type": "boolean",
+            "title": "Paths Truncated",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "memory",
+          "reason"
+        ],
+        "title": "ImpactItem",
+        "description": "Item flagged by impact analysis traversal."
+      },
+      "IngestReport": {
+        "properties": {
+          "message_id": {
+            "type": "integer",
+            "title": "Message Id"
+          },
+          "duplicate": {
+            "type": "boolean",
+            "title": "Duplicate",
+            "default": false
+          },
+          "claims_extracted": {
+            "type": "integer",
+            "title": "Claims Extracted"
+          },
+          "decisions": {
+            "items": {
+              "$ref": "#/components/schemas/DecisionLogEntry"
+            },
+            "type": "array",
+            "title": "Decisions"
+          },
+          "success": {
+            "type": "boolean",
+            "title": "Success",
+            "default": true
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "message_id",
+          "claims_extracted"
+        ],
+        "title": "IngestReport",
+        "description": "Report returned after ingesting a message."
+      },
+      "IngestRequest": {
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "title": "Source Id"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "event_time": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Event Time"
+          },
+          "meta": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Meta"
+          },
+          "recorded_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recorded At"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "e2e",
+              "structured"
+            ],
+            "title": "Mode",
+            "default": "e2e"
+          },
+          "claims": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/Claim"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Claims"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source_id",
+          "text",
+          "event_time"
+        ],
+        "title": "IngestRequest",
+        "description": "Request payload for POST /api/ingest."
+      },
+      "LLMCallLog": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Timestamp"
+          },
+          "prompt_id": {
+            "type": "string",
+            "title": "Prompt Id"
+          },
+          "provider": {
+            "type": "string",
+            "title": "Provider"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model"
+          },
+          "prompt_summary": {
+            "type": "string",
+            "title": "Prompt Summary"
+          },
+          "response_raw": {
+            "type": "string",
+            "title": "Response Raw"
+          },
+          "parsed_json": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parsed Json"
+          },
+          "latency_ms": {
+            "type": "number",
+            "title": "Latency Ms"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "success",
+              "retry",
+              "error",
+              "cache_hit"
+            ],
+            "title": "Status"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "timestamp",
+          "prompt_id",
+          "provider",
+          "model",
+          "prompt_summary",
+          "response_raw",
+          "latency_ms",
+          "status"
+        ],
+        "title": "LLMCallLog",
+        "description": "Auditable log entry for an LLM provider call."
+      },
+      "Memory": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "entity_id": {
+            "type": "integer",
+            "title": "Entity Id"
+          },
+          "entity_name": {
+            "type": "string",
+            "title": "Entity Name",
+            "default": ""
+          },
+          "attribute": {
+            "type": "string",
+            "title": "Attribute"
+          },
+          "value_norm": {
+            "type": "string",
+            "title": "Value Norm"
+          },
+          "value_display": {
+            "type": "string",
+            "title": "Value Display"
+          },
+          "context": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Context"
+          },
+          "context_key": {
+            "type": "string",
+            "title": "Context Key",
+            "default": ""
+          },
+          "valid_from": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Valid From"
+          },
+          "valid_to": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid To"
+          },
+          "recorded_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Recorded At"
+          },
+          "closed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closed At"
+          },
+          "status": {
+            "$ref": "#/components/schemas/MemoryStatus"
+          },
+          "confidence": {
+            "type": "number",
+            "title": "Confidence"
+          },
+          "needs_review": {
+            "type": "boolean",
+            "title": "Needs Review",
+            "default": false
+          },
+          "review_reason": {
+            "type": "string",
+            "title": "Review Reason",
+            "default": ""
+          },
+          "raw_text": {
+            "type": "string",
+            "title": "Raw Text",
+            "default": ""
+          },
+          "message_id": {
+            "type": "integer",
+            "title": "Message Id"
+          },
+          "source_id": {
+            "type": "string",
+            "title": "Source Id"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/Evidence"
+            },
+            "type": "array",
+            "title": "Evidence"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "entity_id",
+          "attribute",
+          "value_norm",
+          "value_display",
+          "valid_from",
+          "recorded_at",
+          "status",
+          "confidence",
+          "message_id",
+          "source_id"
+        ],
+        "title": "Memory",
+        "description": "Core memory item stored in the database."
+      },
+      "MemoryStatus": {
+        "type": "string",
+        "enum": [
+          "active",
+          "historical",
+          "rejected",
+          "disputed"
+        ],
+        "title": "MemoryStatus",
+        "description": "Lifecycle statuses of a memory."
+      },
+      "MemoryView": {
+        "properties": {
+          "memory": {
+            "$ref": "#/components/schemas/Memory"
+          },
+          "effective_confidence": {
+            "type": "number",
+            "title": "Effective Confidence"
+          },
+          "is_stale": {
+            "type": "boolean",
+            "title": "Is Stale"
+          },
+          "source_names": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Source Names"
+          },
+          "scope_match": {
+            "type": "string",
+            "enum": [
+              "exact",
+              "inherited_partial",
+              "inherited_global"
+            ],
+            "title": "Scope Match"
+          }
+        },
+        "type": "object",
+        "required": [
+          "memory",
+          "effective_confidence",
+          "is_stale",
+          "scope_match"
+        ],
+        "title": "MemoryView",
+        "description": "Presentation view of a memory with computed effective confidence."
+      },
+      "Polarity": {
+        "type": "string",
+        "enum": [
+          "assert",
+          "retract"
+        ],
+        "title": "Polarity",
+        "description": "Polarity of a claim."
+      },
+      "QueryIntent": {
+        "type": "string",
+        "enum": [
+          "current",
+          "as_of",
+          "history",
+          "why",
+          "impact",
+          "conflicts"
+        ],
+        "title": "QueryIntent",
+        "description": "Primary intent of a user query."
+      },
+      "QueryPlan": {
+        "properties": {
+          "intent": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/QueryIntent"
+              },
+              {
+                "type": "string",
+                "enum": [
+                  "current",
+                  "as_of",
+                  "history",
+                  "why",
+                  "impact",
+                  "conflicts"
+                ]
+              }
+            ],
+            "title": "Intent"
+          },
+          "entity": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entity"
+          },
+          "attribute": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attribute"
+          },
+          "valid_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid At"
+          },
+          "known_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Known At"
+          },
+          "context": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Context"
+          },
+          "memory_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "intent"
+        ],
+        "title": "QueryPlan",
+        "description": "Parsed query intent and retrieval criteria."
+      },
+      "QueryResult": {
+        "properties": {
+          "plan": {
+            "$ref": "#/components/schemas/QueryPlan"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryView"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "rejected_claims": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryView"
+            },
+            "type": "array",
+            "title": "Rejected Claims"
+          },
+          "disputes": {
+            "items": {
+              "$ref": "#/components/schemas/DisputeView"
+            },
+            "type": "array",
+            "title": "Disputes"
+          },
+          "impact": {
+            "items": {
+              "$ref": "#/components/schemas/ImpactItem"
+            },
+            "type": "array",
+            "title": "Impact"
+          },
+          "decisions": {
+            "items": {
+              "$ref": "#/components/schemas/DecisionLogEntry"
+            },
+            "type": "array",
+            "title": "Decisions"
+          },
+          "edges": {
+            "items": {
+              "$ref": "#/components/schemas/Edge"
+            },
+            "type": "array",
+            "title": "Edges"
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Notes"
+          },
+          "is_ambiguous": {
+            "type": "boolean",
+            "title": "Is Ambiguous",
+            "default": false
+          },
+          "ambiguity_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ambiguity Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "plan"
+        ],
+        "title": "QueryResult",
+        "description": "Result of a query containing retrieved memories, disputes, and impact."
+      },
+      "ResetResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok",
+            "default": true
+          }
+        },
+        "type": "object",
+        "title": "ResetResponse",
+        "description": "Response payload for POST /api/demo/reset."
+      },
+      "ResolveDisputeRequest": {
+        "properties": {
+          "winner_memory_id": {
+            "type": "integer",
+            "title": "Winner Memory Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "winner_memory_id"
+        ],
+        "title": "ResolveDisputeRequest",
+        "description": "Request payload for POST /api/disputes/resolve."
+      },
+      "SlotTimeline": {
+        "properties": {
+          "entity": {
+            "type": "string",
+            "title": "Entity"
+          },
+          "attribute": {
+            "type": "string",
+            "title": "Attribute"
+          },
+          "context_key": {
+            "type": "string",
+            "title": "Context Key",
+            "default": ""
+          },
+          "memories": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryView"
+            },
+            "type": "array",
+            "title": "Memories"
+          },
+          "rejected": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryView"
+            },
+            "type": "array",
+            "title": "Rejected"
+          }
+        },
+        "type": "object",
+        "required": [
+          "entity",
+          "attribute"
+        ],
+        "title": "SlotTimeline",
+        "description": "Timeline lane for a specific entity attribute and context."
+      },
+      "Source": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "admin",
+              "wiki",
+              "tool",
+              "chat",
+              "user",
+              "agent"
+            ],
+            "title": "Type"
+          },
+          "reliability": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Reliability"
+          },
+          "notes": {
+            "type": "string",
+            "title": "Notes",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "type",
+          "reliability"
+        ],
+        "title": "Source",
+        "description": "Information source definition and reliability rating."
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "ValueType": {
+        "type": "string",
+        "enum": [
+          "version",
+          "enum",
+          "text",
+          "number",
+          "date"
+        ],
+        "title": "ValueType",
+        "description": "Value types supported by normalizers and classifiers."
+      }
+    }
+  }
+}

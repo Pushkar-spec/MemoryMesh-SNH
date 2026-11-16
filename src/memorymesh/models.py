@@ -31,7 +31,7 @@ class MeshBaseModel(BaseModel):
     """Base model enforcing YYYY-MM-DDTHH:MM:SSZ datetime serialization for JSON."""
 
     @field_serializer("*", mode="wrap", check_fields=False)
-    def serialize_datetime(self, value: Any, handler: Any) -> Any:
+    def serialize_datetime(self, value: Any, handler: Any):
         if isinstance(value, datetime):
             return format_datetime_utc(value)
         return handler(value)
