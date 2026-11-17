@@ -1,14 +1,8 @@
 /**
- * Foundational TanStack Query hooks and query-key infrastructure for MemoryMesh.
+ * TanStack Query hooks and query-key infrastructure for MemoryMesh.
  *
- * Governed by docs/ARCHITECTURE.md Section 4b, docs/ROADMAP_AND_TASKS.md T9.2,
- * and canonical plan P9.2.
- *
- * Feature-specific hooks are deferred to their respective implementation batches:
- * - P9.3: useIngest, useMemories, useMemory, useAsk
- * - P9.4: useGraph, useTimeline
- * - P9.5: useResolveDispute, useAcknowledgeMemory, useDecisions
- * - P9.7: useLLMCalls, useEvalSummary, useEvalReport
+ * Governed by docs/ARCHITECTURE.md Section 4b, docs/ROADMAP_AND_TASKS.md T9.2/T9.3,
+ * and canonical plan P9.2/P9.3.
  */
 
 import {
@@ -23,6 +17,12 @@ import {
   type HealthResponse,
   type CatalogResponse,
   type ResetResponse,
+  type MemoryView,
+  type QueryResult,
+  type IngestRequest,
+  type IngestReport,
+  type AskRequest,
+  type AskResponse,
   type ApiError,
 } from './client';
 
@@ -47,12 +47,11 @@ export const queryKeys = {
 };
 
 // ==============================================================================
-// Foundational Shell Query Hooks (P9.2)
+// Shell Query Hooks (P9.2)
 // ==============================================================================
 
 /**
  * Fetch backend health, LLM provider info, and database status.
- * Used by Header provider badge and Overview status card.
  */
 export function useHealth(
   options?: Omit<UseQueryOptions<HealthResponse, ApiError>, 'queryKey' | 'queryFn'>
@@ -67,7 +66,6 @@ export function useHealth(
 
 /**
  * Fetch configuration catalog (sources, attributes, entities, thresholds).
- * Used by application overview and shell configuration inspectors.
  */
 export function useCatalog(
   options?: Omit<UseQueryOptions<CatalogResponse, ApiError>, 'queryKey' | 'queryFn'>
@@ -81,13 +79,69 @@ export function useCatalog(
 }
 
 // ==============================================================================
-// Foundational Shell Mutation Hooks (P9.2)
+// Memories & Provenance Query Hooks (P9.3)
+// ==============================================================================
+
+/**
+ * List memories with optional filtering by entity, attribute, status, needs_review.
+ */
+export function useMemories(
+  params?: {
+    entity?: string;
+    attribute?: string;
+    status?: string;
+    needs_review?: boolean;
+    now?: string;
+    limit?: number;
+    offset?: number;
+  },
+  options?: Omit<UseQueryOptions<MemoryView[], ApiError>, 'queryKey' | 'queryFn'>
+) {
+  return useQuery<MemoryView[], ApiError>({
+    queryKey: queryKeys.memories(params),
+    queryFn: () => api.getMemories(params),
+    ...options,
+  });
+}
+
+/**
+ * Retrieve a single memory by ID.
+ */
+export function useMemory(
+  id: number,
+  now?: string,
+  options?: Omit<UseQueryOptions<MemoryView, ApiError>, 'queryKey' | 'queryFn'>
+) {
+  return useQuery<MemoryView, ApiError>({
+    queryKey: queryKeys.memory(id, now),
+    queryFn: () => api.getMemory(id, now),
+    enabled: id > 0,
+    ...options,
+  });
+}
+
+/**
+ * Explain provenance and decision reasoning for a memory.
+ */
+export function useMemoryExplain(
+  id: number,
+  options?: Omit<UseQueryOptions<QueryResult, ApiError>, 'queryKey' | 'queryFn'>
+) {
+  return useQuery<QueryResult, ApiError>({
+    queryKey: queryKeys.memoryExplain(id),
+    queryFn: () => api.explainMemory(id),
+    enabled: id > 0,
+    ...options,
+  });
+}
+
+// ==============================================================================
+// Mutation Hooks (P9.2 / P9.3)
 // ==============================================================================
 
 /**
  * Reset database and re-seed demo data.
- * Explicitly required by App Shell Header per T9.2 ("header (demo clock, provider badge, Reset demo)").
- * On success, invalidates all queries across the application.
+ * Invalidates all queries across the application.
  */
 export function useResetDemo(
   options?: UseMutationOptions<ResetResponse, ApiError, void>
@@ -98,6 +152,36 @@ export function useResetDemo(
     onSuccess: () => {
       queryClient.invalidateQueries();
     },
+    ...options,
+  });
+}
+
+/**
+ * Ingest message and extract/resolve memory claims (P9.3).
+ * On success, invalidates memory and decision queries.
+ */
+export function useIngest(
+  options?: UseMutationOptions<IngestReport, ApiError, IngestRequest>
+) {
+  const queryClient = useQueryClient();
+  return useMutation<IngestReport, ApiError, IngestRequest>({
+    mutationFn: (body) => api.ingest(body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['memories'] });
+      queryClient.invalidateQueries({ queryKey: ['decisions'] });
+    },
+    ...options,
+  });
+}
+
+/**
+ * Ask a natural language question with optional naive RAG comparison (P9.3).
+ */
+export function useAsk(
+  options?: UseMutationOptions<AskResponse, ApiError, AskRequest>
+) {
+  return useMutation<AskResponse, ApiError, AskRequest>({
+    mutationFn: (body) => api.ask(body),
     ...options,
   });
 }

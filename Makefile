@@ -53,6 +53,7 @@ types:
 web-check:
 	npm --prefix frontend run lint
 	npx --prefix frontend tsc -p frontend/tsconfig.app.json --noEmit
+	npm --prefix frontend test
 	npm --prefix frontend run build
 
 smoke:

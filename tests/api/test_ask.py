@@ -105,3 +105,19 @@ def test_ask_now_timezone_validation(client: TestClient) -> None:
     }
     res_offset = client.post("/api/ask", json=payload_offset)
     assert res_offset.status_code == 200
+
+
+def test_ask_sequential_success_then_failure(client: TestClient) -> None:
+    """Verify first ask succeeds and second ask fails with validation error."""
+    # First question succeeds
+    res_success = client.post(
+        "/api/ask",
+        json={"question": "What version?", "now": "2026-06-01T12:00:00Z"},
+    )
+    assert res_success.status_code == 200
+    assert "mesh" in res_success.json()
+
+    # Second question fails validation
+    res_fail = client.post("/api/ask", json={"question": "   ", "now": "invalid-time"})
+    assert res_fail.status_code == 422
+    assert res_fail.json()["error"]["code"] == "validation_error"

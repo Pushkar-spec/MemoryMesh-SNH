@@ -11,7 +11,9 @@ export type HealthResponse = Schemas['HealthResponse'];
 export type CatalogResponse = Schemas['CatalogResponse'];
 export type Memory = Schemas['Memory'];
 export type MemoryView = Schemas['MemoryView'];
+export type MemoryStatus = Schemas['MemoryStatus'];
 export type DecisionLogEntry = Schemas['DecisionLogEntry'];
+export type ResolutionDecision = DecisionLogEntry;
 export type DisputeView = Schemas['DisputeView'];
 export type GraphResponse = Schemas['GraphResponse'];
 export type SlotTimeline = Schemas['SlotTimeline'];
@@ -19,6 +21,9 @@ export type IngestRequest = Schemas['IngestRequest'];
 export type IngestReport = Schemas['IngestReport'];
 export type AskRequest = Schemas['AskRequest'];
 export type AskResponse = Schemas['AskResponse'];
+export type AskResult = Schemas['AskResult'];
+export type FinalAnswer = Schemas['FinalAnswer'];
+export type BaselineHit = Schemas['BaselineHit'];
 export type LLMCallLog = Schemas['LLMCallLog'];
 export type EvalSummary = Schemas['EvalSummary'];
 export type ResetResponse = Schemas['ResetResponse'];
@@ -165,7 +170,9 @@ export async function apiRequest<T>(
 /**
  * Query parameter serializer helper.
  */
-function toQueryString(params?: Record<string, string | number | boolean | null | undefined>): string {
+function toQueryString(
+  params?: Record<string, string | number | boolean | null | undefined>
+): string {
   if (!params) return '';
   const searchParams = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {

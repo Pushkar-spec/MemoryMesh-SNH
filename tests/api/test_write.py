@@ -182,3 +182,61 @@ def test_demo_reset(client: TestClient) -> None:
 
     # Verify empty memories
     assert len(client.get("/api/memories").json()) == 0
+
+
+def test_ingest_sequential_success_then_failure(client: TestClient) -> None:
+    """Verify first ingest succeeds and second ingest fails with validation error."""
+    # First ingest succeeds
+    res_success = client.post(
+        "/api/ingest",
+        json={
+            "source_id": "sysadmin_priya",
+            "event_time": "2026-06-01T10:00:00Z",
+            "text": "Server A runs Python 3.12.",
+            "mode": "structured",
+            "claims": [
+                {
+                    "subject": "Server A",
+                    "attribute": "python_version",
+                    "value": "3.12",
+                    "polarity": "assert",
+                    "extract_confidence": 0.90,
+                }
+            ],
+        },
+    )
+    assert res_success.status_code == 200
+    assert res_success.json()["success"] is True
+
+    # Second ingest fails validation (invalid timezone-naive timestamp)
+    res_fail = client.post(
+        "/api/ingest",
+        json={
+            "source_id": "sysadmin_priya",
+            "event_time": "2026-06-01T10:00:00",
+            "text": "Server A runs Python 3.13.",
+            "mode": "structured",
+            "claims": [],
+        },
+    )
+    assert res_fail.status_code == 422
+    assert res_fail.json()["error"]["code"] == "validation_error"
+
+
+def test_ingest_rejects_year_zero_timestamp(client: TestClient) -> None:
+    """Verify POST /api/ingest returns HTTP 422 for year 0000 timestamp."""
+    res = client.post(
+        "/api/ingest",
+        json={
+            "source_id": "sysadmin_priya",
+            "event_time": "0000-01-01T00:00:00Z",
+            "text": "Server at year 0.",
+            "mode": "structured",
+            "claims": [],
+        },
+    )
+    assert res.status_code == 422
+    data = res.json()
+    assert data["error"]["code"] == "validation_error"
+    msg = data["error"]["message"].lower()
+    assert "year 0" in msg or "range" in msg
