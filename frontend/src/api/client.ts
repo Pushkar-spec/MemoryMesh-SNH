@@ -16,6 +16,8 @@ export type DecisionLogEntry = Schemas['DecisionLogEntry'];
 export type ResolutionDecision = DecisionLogEntry;
 export type DisputeView = Schemas['DisputeView'];
 export type GraphResponse = Schemas['GraphResponse'];
+export type GraphNode = Schemas['GraphNode'];
+export type GraphEdge = Schemas['GraphEdge'];
 export type SlotTimeline = Schemas['SlotTimeline'];
 export type IngestRequest = Schemas['IngestRequest'];
 export type IngestReport = Schemas['IngestReport'];
@@ -215,10 +217,14 @@ export const api = {
   getMemoryImpact: (id: number): Promise<ImpactItem[]> =>
     apiRequest<ImpactItem[]>(`/api/memories/${id}/impact`),
 
-  getTimeline: (params?: { entity?: string; attribute?: string }): Promise<SlotTimeline> =>
-    apiRequest<SlotTimeline>(`/api/timeline${toQueryString(params)}`),
+  getTimeline: (params?: {
+    entity?: string;
+    attribute?: string;
+    now?: string;
+  }): Promise<SlotTimeline[]> =>
+    apiRequest<SlotTimeline[]>(`/api/timeline${toQueryString(params)}`),
 
-  getGraph: (params?: { seed_id?: number; depth?: number }): Promise<GraphResponse> =>
+  getGraph: (params?: { entity?: string; now?: string }): Promise<GraphResponse> =>
     apiRequest<GraphResponse>(`/api/graph${toQueryString(params)}`),
 
   getDecisions: (params?: {

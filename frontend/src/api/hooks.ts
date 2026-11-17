@@ -23,6 +23,8 @@ import {
   type IngestReport,
   type AskRequest,
   type AskResponse,
+  type GraphResponse,
+  type SlotTimeline,
   type ApiError,
 } from './client';
 
@@ -36,9 +38,9 @@ export const queryKeys = {
   memory: (id: number, now?: string) => ['memory', id, now] as const,
   memoryExplain: (id: number) => ['memory', id, 'explain'] as const,
   memoryImpact: (id: number) => ['memory', id, 'impact'] as const,
-  timeline: (params?: { entity?: string; attribute?: string }) =>
+  timeline: (params?: { entity?: string; attribute?: string; now?: string }) =>
     ['timeline', params] as const,
-  graph: (params?: { seed_id?: number; depth?: number }) =>
+  graph: (params?: { entity?: string; now?: string }) =>
     ['graph', params] as const,
   decisions: (params?: Record<string, unknown>) => ['decisions', params] as const,
   llmCalls: (params?: Record<string, unknown>) => ['llmCalls', params] as const,
@@ -131,6 +133,38 @@ export function useMemoryExplain(
     queryKey: queryKeys.memoryExplain(id),
     queryFn: () => api.explainMemory(id),
     enabled: id > 0,
+    ...options,
+  });
+}
+
+// ==============================================================================
+// Graph and Timeline Query Hooks (P9.4)
+// ==============================================================================
+
+/**
+ * Retrieve entity and memory dependency graph (P9.4).
+ */
+export function useGraph(
+  params?: { entity?: string; now?: string },
+  options?: Omit<UseQueryOptions<GraphResponse, ApiError>, 'queryKey' | 'queryFn'>
+) {
+  return useQuery<GraphResponse, ApiError>({
+    queryKey: queryKeys.graph(params),
+    queryFn: () => api.getGraph(params),
+    ...options,
+  });
+}
+
+/**
+ * Retrieve slot timeline grouped by entity and attribute lanes (P9.4).
+ */
+export function useTimeline(
+  params?: { entity?: string; attribute?: string; now?: string },
+  options?: Omit<UseQueryOptions<SlotTimeline[], ApiError>, 'queryKey' | 'queryFn'>
+) {
+  return useQuery<SlotTimeline[], ApiError>({
+    queryKey: queryKeys.timeline(params),
+    queryFn: () => api.getTimeline(params),
     ...options,
   });
 }
