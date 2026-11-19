@@ -94,7 +94,11 @@ export function DisputeCard({
           {/* Temporal & Source Details */}
           <div className="space-y-1.5 text-xs pt-1">
             <ValidityBar validFrom={mem.valid_from} validTo={mem.valid_to} />
-            <div className="flex flex-wrap items-center justify-between gap-1 text-[11px] text-slate-400">
+            <div
+              className={
+                'flex flex-wrap items-center justify-between gap-1 text-[11px] text-slate-400'
+              }
+            >
               <span>Source: <span className="font-mono text-slate-300">{mem.source_id}</span></span>
               <span>Learned: {formatUtcDateTime(mem.recorded_at)}</span>
             </div>
@@ -170,7 +174,8 @@ export function DisputeCard({
       >
         <p className="text-xs text-slate-400">
           {selectedWinnerId
-            ? `Memory #${selectedWinnerId} selected as winner. Submitting will supersede other claims.`
+            ? `Memory #${selectedWinnerId} selected as winner. ` +
+              'Submitting will supersede other claims.'
             : 'Select one of the competing claims above to resolve the dispute.'}
         </p>
 

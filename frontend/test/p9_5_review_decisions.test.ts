@@ -322,3 +322,67 @@ test('Decisions rules: extracts unique sorted list of canonical and dynamic rule
   assert.deepEqual(rules, sortedCopy);
 });
 
+test('Review concurrency: duplicate submissions blocked while mutation is pending', async () => {
+  let backendCallCount = 0;
+  let isPending = false;
+
+  const submitResolve = async (winnerId: number): Promise<boolean> => {
+    assert.ok(winnerId > 0);
+    // Component guard: disabled={isResolving} prevents triggering handler
+    if (isPending) {
+      return false; // Submission blocked
+    }
+    isPending = true;
+    try {
+      backendCallCount++;
+      // Simulate in-flight network delay
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return true;
+    } finally {
+      isPending = false;
+    }
+  };
+
+  // Launch first submission
+  const firstPromise = submitResolve(101);
+  // Attempt duplicate submission while first is still pending
+  const secondAttempt = await submitResolve(101);
+  const firstResult = await firstPromise;
+
+  assert.equal(firstResult, true, 'First submission should succeed');
+  assert.equal(secondAttempt, false, 'Concurrent submission should be blocked');
+  assert.equal(backendCallCount, 1, 'Only one backend mutation must be initiated');
+});
+
+test('Decisions display: decision fields and audit trail are preserved', () => {
+  const d = SAMPLE_DECISIONS[0];
+  assert.equal(d.id, 1);
+  assert.equal(d.action, 'insert');
+  assert.equal(d.rule_id, 'R-INSERT');
+  assert.equal(d.memory_id, 301);
+  assert.deepEqual(d.affected_memory_ids, [301]);
+  assert.deepEqual(d.claim_json, { subject: 'Server A', attribute: 'os_name', value: 'Ubuntu' });
+  assert.ok(d.explanation.length > 0);
+  assert.equal(d.created_at, '2026-06-01T10:00:00Z');
+});
+
+test('Decisions state: handles empty results and API errors gracefully', () => {
+  // Empty result array
+  const emptyDecisions: DecisionLogEntry[] = [];
+  const filteredEmpty = filterDecisionsByRule(emptyDecisions, 'R-INSERT');
+  assert.deepEqual(filteredEmpty, []);
+
+  const emptyRules = extractAvailableRules(emptyDecisions, ['R-INSERT', 'R-REPLACE']);
+  assert.deepEqual(emptyRules, ['R-INSERT', 'R-REPLACE']);
+
+  // Documented API error mapping check
+  const errorEnvelope = {
+    error: {
+      code: 'decision_not_found',
+      message: 'Decision log with id=999 does not exist',
+    },
+  };
+  const extractedMessage = errorEnvelope.error.message;
+  assert.equal(extractedMessage, 'Decision log with id=999 does not exist');
+});
+

@@ -97,7 +97,9 @@ export function ReviewMemoryCard({
         <div className={alertBoxClass}>
           <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
           <div>
-            <span className="font-semibold block text-[11px] uppercase tracking-wider text-amber-400">
+            <span
+              className="font-semibold block text-[11px] uppercase tracking-wider text-amber-400"
+            >
               Flagged Reason:
             </span>
             <span>{mem.review_reason}</span>

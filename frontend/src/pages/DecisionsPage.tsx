@@ -20,8 +20,13 @@ const CANONICAL_RULES = [
   'R-CORROBORATE',
   'R-DISPUTE',
   'R-DISPUTE-RESOLVE',
-  'R-REJECT',
+  'R-COEXIST',
+  'R-REFINE',
+  'R-BACKFILL',
   'R-RETRACT',
+  'R-REJECT',
+  'R-PROPAGATE',
+  'R-ACKNOWLEDGE',
 ] as const;
 
 export function DecisionsPage(): React.JSX.Element {
