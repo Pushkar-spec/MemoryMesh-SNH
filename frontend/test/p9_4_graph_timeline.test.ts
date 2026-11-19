@@ -218,7 +218,41 @@ test('Production graph transformation: filters edges with missing source or miss
   assert.equal(directFiltered.length, 2);
 });
 
-test('Production layoutGraphNodes: safely handles orphan memories without throwing', () => {
+test('Production layoutGraphEdges: excludes edge with missing source node', () => {
+  const validNodeIds = new Set(['entity:1', 'mem:1']);
+  const edges: GraphEdge[] = [
+    { id: 'e-valid', source: 'mem:1', target: 'entity:1', type: 'about' },
+    {
+      id: 'e-missing-src',
+      source: 'mem:nonexistent_src',
+      target: 'entity:1',
+      type: 'about',
+    },
+  ];
+  const result = layoutGraphEdges(edges, validNodeIds);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].id, 'e-valid');
+  assert.ok(!result.some((e) => e.id === 'e-missing-src'));
+});
+
+test('Production layoutGraphEdges: excludes edge with missing target node', () => {
+  const validNodeIds = new Set(['entity:1', 'mem:1']);
+  const edges: GraphEdge[] = [
+    { id: 'e-valid', source: 'mem:1', target: 'entity:1', type: 'about' },
+    {
+      id: 'e-missing-tgt',
+      source: 'mem:1',
+      target: 'entity:nonexistent_tgt',
+      type: 'about',
+    },
+  ];
+  const result = layoutGraphEdges(edges, validNodeIds);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].id, 'e-valid');
+  assert.ok(!result.some((e) => e.id === 'e-missing-tgt'));
+});
+
+test('Production layoutGraphNodes: handles orphan memories and excludes invalid edges', () => {
   const unlinkedNodes: GraphNode[] = [
     { id: 'entity:1', kind: 'entity', label: 'Server A', meta: {} },
     { id: 'mem:10', kind: 'memory', label: 'status: online', status: 'active', meta: {} },
@@ -238,6 +272,14 @@ test('Production layoutGraphNodes: safely handles orphan memories without throwi
   assert.ok(orphanNode, 'Orphan memory node must be preserved in layout');
   assert.equal(orphanNode.type, 'memory');
   assert.equal(orphanNode.position.x, 360);
+
+  // Verify that the graph transformation excludes the dangling edge a2
+  // whose target entity:999 is absent from the rendered nodes.
+  const result = transformGraphResponse({ nodes: unlinkedNodes, edges: unlinkedEdges });
+  assert.equal(result.nodes.length, 3);
+  assert.equal(result.edges.length, 1);
+  assert.equal(result.edges[0].id, 'a1');
+  assert.ok(!result.edges.some((e) => e.id === 'a2'), 'Invalid edge a2 must be excluded');
 });
 
 test('Production transformGraphResponse: safely handles empty and undefined graphs', () => {
@@ -252,6 +294,14 @@ test('Production transformGraphResponse: safely handles empty and undefined grap
   const partialRes = transformGraphResponse({});
   assert.deepEqual(partialRes.nodes, []);
   assert.deepEqual(partialRes.edges, []);
+
+  // Empty nodes with dangling edges
+  const danglingOnly = transformGraphResponse({
+    nodes: [],
+    edges: [{ id: 'e1', source: 'ghost1', target: 'ghost2', type: 'about' }],
+  });
+  assert.deepEqual(danglingOnly.nodes, []);
+  assert.deepEqual(danglingOnly.edges, []);
 });
 
 // ---------------------------------------------------------------------------
@@ -300,6 +350,26 @@ test('Production getTimelineLaneKey: generates collision-free composite keys', (
 
   // Idempotency: identical data produces identical keys
   assert.equal(getTimelineLaneKey(lane1), getTimelineLaneKey({ ...lane1 }));
+
+  // Missing and empty context keys behave consistently
+  const laneMissingCtx: SlotTimeline = { entity: 'Server', attribute: 'os' };
+  const laneEmptyCtx: SlotTimeline = { entity: 'Server', attribute: 'os', context_key: '' };
+  const laneNullCtx = {
+    entity: 'Server',
+    attribute: 'os',
+    context_key: null as unknown as string,
+  };
+  const laneUndefCtx: SlotTimeline = {
+    entity: 'Server',
+    attribute: 'os',
+    context_key: undefined,
+  };
+
+  const expectedKey = JSON.stringify(['Server', 'os', '']);
+  assert.equal(getTimelineLaneKey(laneMissingCtx), expectedKey);
+  assert.equal(getTimelineLaneKey(laneEmptyCtx), expectedKey);
+  assert.equal(getTimelineLaneKey(laneNullCtx as SlotTimeline), expectedKey);
+  assert.equal(getTimelineLaneKey(laneUndefCtx), expectedKey);
 });
 
 test('Production getTimelineLaneStats: separates all 4 memory statuses', () => {
@@ -436,6 +506,82 @@ test('Production getTimelineLaneStats: separates all 4 memory statuses', () => {
   assert.equal(stats.disputedCount, 1, 'disputedCount must only count status=disputed');
   assert.equal(stats.rejectedCount, 1, 'rejectedCount must count rejected claims array');
   assert.equal(stats.totalCount, 4, 'totalCount must be sum of memories and rejected');
+});
+
+test('Production getTimelineLaneStats: prevents double counting with explicit statuses', () => {
+  const sharedMemory = {
+    id: 99,
+    entity_id: 1,
+    entity_name: 'Server A',
+    attribute: 'os',
+    value_norm: 'Linux',
+    value_display: 'Linux',
+    context: {},
+    context_key: '',
+    valid_from: '2026-06-01T10:00:00Z',
+    valid_to: null,
+    recorded_at: '2026-06-01T10:00:00Z',
+    closed_at: null,
+    status: 'rejected' as const,
+    confidence: 0.2,
+    needs_review: false,
+    review_reason: '',
+    raw_text: '',
+    message_id: 99,
+    source_id: 'src',
+    evidence: [],
+  };
+
+  const laneWithDuplicates: SlotTimeline = {
+    entity: 'Server A',
+    attribute: 'os',
+    context_key: '',
+    memories: [
+      {
+        memory: sharedMemory,
+        effective_confidence: 0.2,
+        is_stale: false,
+        source_names: ['src'],
+        scope_match: 'exact',
+      },
+      // Unknown status memory: must NOT be counted as historical
+      {
+        memory: {
+          ...sharedMemory,
+          id: 100,
+          status: 'pending' as unknown as 'active',
+        },
+        effective_confidence: 0.5,
+        is_stale: false,
+        source_names: ['src'],
+        scope_match: 'exact',
+      },
+    ],
+    // The exact same memory id 99 in rejected collection
+    rejected: [
+      {
+        memory: sharedMemory,
+        effective_confidence: 0.2,
+        is_stale: false,
+        source_names: ['src'],
+        scope_match: 'exact',
+      },
+    ],
+  };
+
+  const stats = getTimelineLaneStats(laneWithDuplicates);
+
+  // Statuses must be handled explicitly:
+  // - activeCount: 0
+  // - historicalCount: 0 (unknown status 'pending' is NOT counted as historical)
+  // - disputedCount: 0
+  // - rejectedCount: 1 (memory id 99 appears in both arrays, must only count once)
+  // - totalCount: 2 (unique memory 99 and unique memory 100, no double counting)
+  assert.equal(stats.activeCount, 0, 'activeCount must be 0');
+  assert.equal(stats.historicalCount, 0, 'historicalCount must not count unknown statuses');
+  assert.equal(stats.disputedCount, 0, 'disputedCount must be 0');
+  assert.equal(stats.rejectedCount, 1, 'rejectedCount must not double-count overlapping items');
+  assert.equal(stats.totalCount, 2, 'totalCount must not double count overlapping memory items');
 });
 
 test('Timeline Formatting: correctly presents bitemporal intervals and confidence', () => {

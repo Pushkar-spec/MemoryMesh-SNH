@@ -104,13 +104,15 @@ export function layoutGraphNodes(
  */
 export function layoutGraphEdges(
   apiEdges: GraphEdge[] = [],
-  validNodeIds?: Set<string> | Node[]
+  validNodeIds?: Set<string> | Node[] | string[]
 ): Edge[] {
   const nodeSet =
     validNodeIds instanceof Set
       ? validNodeIds
       : Array.isArray(validNodeIds)
-        ? new Set(validNodeIds.map((n) => n.id))
+        ? new Set(
+            validNodeIds.map((n) => (typeof n === 'string' ? n : n.id))
+          )
         : undefined;
 
   const validEdges = (apiEdges ?? []).filter((e) => {

@@ -228,13 +228,15 @@ export const api = {
     apiRequest<GraphResponse>(`/api/graph${toQueryString(params)}`),
 
   getDecisions: (params?: {
-    action?: string;
     rule_id?: string;
-    entity?: string;
+    message_id?: number;
     limit?: number;
     offset?: number;
   }): Promise<DecisionLogEntry[]> =>
     apiRequest<DecisionLogEntry[]>(`/api/decisions${toQueryString(params)}`),
+
+  getDisputes: (params?: { entity?: string; now?: string }): Promise<DisputeView[]> =>
+    apiRequest<DisputeView[]>(`/api/disputes${toQueryString(params)}`),
 
   getLLMCalls: (params?: {
     prompt_id?: string;
@@ -257,28 +259,13 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  acknowledgeMemory: (
-    id: number
-  ): Promise<{ success: boolean; memory_id: number; unflagged: boolean }> =>
-    apiRequest<{ success: boolean; memory_id: number; unflagged: boolean }>(
-      `/api/memories/${id}/acknowledge`,
-      { method: 'POST' }
-    ),
+  acknowledgeMemory: (id: number): Promise<Memory> =>
+    apiRequest<Memory>(`/api/memories/${id}/acknowledge`, {
+      method: 'POST',
+    }),
 
-  resolveDispute: (
-    body: ResolveDisputeRequest
-  ): Promise<{
-    success: boolean;
-    dispute_id: number;
-    winner_memory_id: number;
-    affected_memory_ids: number[];
-  }> =>
-    apiRequest<{
-      success: boolean;
-      dispute_id: number;
-      winner_memory_id: number;
-      affected_memory_ids: number[];
-    }>('/api/disputes/resolve', {
+  resolveDispute: (body: ResolveDisputeRequest): Promise<DecisionLogEntry> =>
+    apiRequest<DecisionLogEntry>('/api/disputes/resolve', {
       method: 'POST',
       body: JSON.stringify(body),
     }),

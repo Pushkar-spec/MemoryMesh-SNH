@@ -17,6 +17,7 @@ import {
   type HealthResponse,
   type CatalogResponse,
   type ResetResponse,
+  type Memory,
   type MemoryView,
   type QueryResult,
   type IngestRequest,
@@ -25,6 +26,9 @@ import {
   type AskResponse,
   type GraphResponse,
   type SlotTimeline,
+  type DecisionLogEntry,
+  type DisputeView,
+  type ResolveDisputeRequest,
   type ApiError,
 } from './client';
 
@@ -42,7 +46,14 @@ export const queryKeys = {
     ['timeline', params] as const,
   graph: (params?: { entity?: string; now?: string }) =>
     ['graph', params] as const,
-  decisions: (params?: Record<string, unknown>) => ['decisions', params] as const,
+  disputes: (params?: { entity?: string; now?: string }) =>
+    ['disputes', params] as const,
+  decisions: (params?: {
+    rule_id?: string;
+    message_id?: number;
+    limit?: number;
+    offset?: number;
+  }) => ['decisions', params] as const,
   llmCalls: (params?: Record<string, unknown>) => ['llmCalls', params] as const,
   evalSummary: ['evalSummary'] as const,
   evalReport: ['evalReport'] as const,
@@ -170,6 +181,43 @@ export function useTimeline(
 }
 
 // ==============================================================================
+// Disputes & Decision History Query Hooks (P9.5)
+// ==============================================================================
+
+/**
+ * Retrieve active memory disputes (P9.5).
+ */
+export function useDisputes(
+  params?: { entity?: string; now?: string },
+  options?: Omit<UseQueryOptions<DisputeView[], ApiError>, 'queryKey' | 'queryFn'>
+) {
+  return useQuery<DisputeView[], ApiError>({
+    queryKey: queryKeys.disputes(params),
+    queryFn: () => api.getDisputes(params),
+    ...options,
+  });
+}
+
+/**
+ * Retrieve decision history logs with optional rule/message filtering (P9.5).
+ */
+export function useDecisions(
+  params?: {
+    rule_id?: string;
+    message_id?: number;
+    limit?: number;
+    offset?: number;
+  },
+  options?: Omit<UseQueryOptions<DecisionLogEntry[], ApiError>, 'queryKey' | 'queryFn'>
+) {
+  return useQuery<DecisionLogEntry[], ApiError>({
+    queryKey: queryKeys.decisions(params),
+    queryFn: () => api.getDecisions(params),
+    ...options,
+  });
+}
+
+// ==============================================================================
 // Mutation Hooks (P9.2 / P9.3)
 // ==============================================================================
 
@@ -216,6 +264,51 @@ export function useAsk(
 ) {
   return useMutation<AskResponse, ApiError, AskRequest>({
     mutationFn: (body) => api.ask(body),
+    ...options,
+  });
+}
+
+// ==============================================================================
+// Dispute Resolution & Review Acknowledgement Mutation Hooks (P9.5)
+// ==============================================================================
+
+/**
+ * Resolve an active memory dispute by selecting a winning memory ID (P9.5).
+ * On success, invalidates disputes, memories, decisions, timeline, and graph queries.
+ */
+export function useResolveDispute(
+  options?: UseMutationOptions<DecisionLogEntry, ApiError, ResolveDisputeRequest>
+) {
+  const queryClient = useQueryClient();
+  return useMutation<DecisionLogEntry, ApiError, ResolveDisputeRequest>({
+    mutationFn: (body) => api.resolveDispute(body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['disputes'] });
+      queryClient.invalidateQueries({ queryKey: ['memories'] });
+      queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      queryClient.invalidateQueries({ queryKey: ['timeline'] });
+      queryClient.invalidateQueries({ queryKey: ['graph'] });
+    },
+    ...options,
+  });
+}
+
+/**
+ * Acknowledge a human review flag on a memory (P9.5).
+ * On success, invalidates memories, memory, decisions, and disputes queries.
+ */
+export function useAcknowledgeMemory(
+  options?: UseMutationOptions<Memory, ApiError, number>
+) {
+  const queryClient = useQueryClient();
+  return useMutation<Memory, ApiError, number>({
+    mutationFn: (id) => api.acknowledgeMemory(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['memories'] });
+      queryClient.invalidateQueries({ queryKey: ['memory'] });
+      queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      queryClient.invalidateQueries({ queryKey: ['disputes'] });
+    },
     ...options,
   });
 }
