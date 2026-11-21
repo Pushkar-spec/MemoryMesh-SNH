@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from memorymesh.api.errors import register_error_handlers
-from memorymesh.api.routers import ask, llm, read, write
+from memorymesh.api.routers import ask, demo, llm, read, write
 from memorymesh.api.routers import eval as eval_router
 from memorymesh.config import AppConfig, load_app_config
 from memorymesh.db import DEFAULT_DB_PATH, init_db
@@ -121,6 +121,7 @@ def create_app(
     app.include_router(ask.router, prefix="/api")
     app.include_router(llm.router, prefix="/api")
     app.include_router(eval_router.router, prefix="/api")
+    app.include_router(demo.router, prefix="/api")
 
     return app
 

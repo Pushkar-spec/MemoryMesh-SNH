@@ -625,7 +625,19 @@ Routes are thin: validate input, call `MemoryService`, return Pydantic models. *
 
 | Method & Path | Query | Events |
 | :--- | :--- | :--- |
-| `GET /api/demo/replay` | `scenario=hero-001`, `mode=structured\|e2e`, `delay_ms=800`, `reset=true` | `message_ingested` (data: `IngestReport`), `error` (data: error object), `done` (data: `{"messages": int}`) |
+| `GET /api/demo/replay` | `scenario=hero-001`, `mode=structured\|e2e`, `delay_ms=800` | `message_ingested` (data: `IngestReport`), `error` (data: error object), `done` (data: `{"messages": int}`) |
+
+*Note on Replay Read-Only Semantics, Concurrency & Security Limitations:*
+- `GET /api/demo/replay` is strictly read-only and never performs destructive database operations,
+  regardless of query parameters (legacy `reset=true` parameter is ignored).
+- Destructive database reset is explicitly separated into `POST /api/demo/reset`, which recreates
+  the clean schema and resets application state before starting an intentional clean replay.
+- Concurrency Guard: Replay sessions are guarded by an atomic non-blocking session lock. A second
+  concurrent request is rejected immediately with an `error` SSE event payload stating that a replay
+  session is already active.
+- Security Limitation: MemoryMesh is an internal demo/evaluation system with no built-in
+  authentication or authorization controls. The frontend confirmation dialog provides user
+  experience protection against accidental database wiping, not secure access control.
 
 ### 7.3 Additional response models
 
